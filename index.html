@@ -4,29 +4,25 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Schademeldingen · Verpa Benelux</title>
-
-  <!-- Verpa gedeelde UI (hosted op verpa-ui.pages.dev) -->
+  
+  <!-- Verpa-UI stijlen (extern) -->
   <link rel="stylesheet" href="https://verpa-ui.pages.dev/verpa-ui.css" />
-
   <!-- App-specifieke stijlen -->
-  <link rel="stylesheet" href="schade-app.css" />
-
-  <!-- Lucide icons -->
-  <script src="https://unpkg.com/lucide@latest" defer></script>
-
+  <link rel="stylesheet" href="app.css" />
+  
+  <!-- Lucide iconen -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  
   <style>
     html, body { -webkit-tap-highlight-color: transparent; }
     @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
-    /* Verberg file-inputs netjes -->*/
-    input[type="file"].hidden { display: none; }
   </style>
 </head>
 <body>
   <div id="app"></div>
   <div id="overlay-root"></div>
-  <div id="v-toast"></div>
 
-  <!-- App logica -->
-  <script src="schade-app.js"></script>
+  <!-- App-logica (externe JS) -->
+  <script src="app.js"></script>
 </body>
 </html>

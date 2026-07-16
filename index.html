@@ -4,25 +4,1191 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Schademeldingen · Verpa Benelux</title>
-  
-  <!-- Verpa-UI stijlen (extern) -->
-  <link rel="stylesheet" href="https://verpa-ui.pages.dev/verpa-ui.css" />
-  <!-- App-specifieke stijlen -->
-  <link rel="stylesheet" href="app.css" />
-  
-  <!-- Lucide iconen -->
+  <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
-  
   <style>
     html, body { -webkit-tap-highlight-color: transparent; }
     @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
   </style>
 </head>
-<body>
+<body class="bg-slate-50 text-slate-900 antialiased" style="font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;">
   <div id="app"></div>
   <div id="overlay-root"></div>
 
-  <!-- App-logica (externe JS) -->
-  <script src="app.js"></script>
+<script>
+/* ============================================================================
+ *  SCHADEMELDINGEN — zelfstandige app voor Cloudflare Pages
+ *  MSAL (delegated) + Microsoft Graph -> eigen SharePoint-lijsten + fotobibliotheek
+ * ==========================================================================
+ *
+ *  Deze app staat volledig op zichzelf (eigen Azure-app-registratie, eigen
+ *  lijsten). Zie het meegeleverde STAPPENPLAN.md voor de volledige installatie.
+ *  Kort:
+ *   1) Maak een eigen Azure-app-registratie "Schademeldingen" (SPA) en vul
+ *      clientId + tenantId hieronder in.
+ *   2) Zet redirectUri gelijk aan je Cloudflare Pages-adres en voeg datzelfde
+ *      adres toe als SPA-redirect in die app-registratie.
+ *   3) Sleep dit bestand als index.html naar een Cloudflare Pages-project.
+ *  De lijsten (Schademeldingen, SchadeInstellingen, SchadeReacties) en de
+ *  fotomap worden automatisch aangemaakt bij het eerste gebruik.
+ *
+ *  Nog nodig in de app-registratie:
+ *   - Delegated Graph-permissies: User.Read, Sites.ReadWrite.All, Files.ReadWrite.All
+ *     (Mail.Send is momenteel uitgeschakeld via mailEnabled: false — zet op true
+ *      en voeg Mail.Send toe aan scopes[] zodra die permissie goedgekeurd is)
+ *   - Een App Role "Admin" definiëren en toewijzen aan de beheerders. Zij zien
+ *     de verwijderknop en de e-mailinstellingen. Na toekennen: opnieuw aanmelden.
+ * ============================================================================ */
+const CONFIG = {
+  clientId:    "b2bbb9ba-b6f1-4046-91fe-cc8fa5df7a7b",   // App (client) ID van app-registratie "Schademeldingen"
+  tenantId:    "e65dbe4b-d1e2-4283-b0f5-aa7717e81077",   // Verpa Benelux tenant
+  redirectUri: "https://verpa-schade.pages.dev",         // je Cloudflare Pages-adres voor deze app
+  siteHostname:"verpabenelux.sharepoint.com",            // jouw SharePoint hostname
+  sitePath:    "/sites/OfficeData",                      // pad naar de SharePoint-site waar de lijsten komen
+  listName:    "Schademeldingen",                        // hoofdlijst met de meldingen
+  attachFolder:"Schadefotos",                            // map in de documentbibliotheek voor foto's
+  settingsList:"SchadeInstellingen",                     // lijst met de e-mailinstellingen (auto aangemaakt)
+  commentsList:"SchadeReacties",                         // lijst met het gesprek per melding (auto aangemaakt)
+  adminRole:   "Admin",                                  // naam van de Azure AD App Role voor beheerders
+  scopes:      ["User.Read", "Sites.ReadWrite.All", "Files.ReadWrite.All"],
+  mailEnabled: false,                                    // op true zetten zodra Mail.Send goedgekeurd is
+};
+
+const GRAPH = "https://graph.microsoft.com/v1.0";
+
+/* ------------------------------------------------------------------ *
+ *  Fasen + velden (single source of truth)
+ * ------------------------------------------------------------------ */
+const COMMON_HEAD = [
+  { name: "warehouse", label: "Magazijn", type: "select", options: ["LAAKDAL", "STORA"], required: true },
+  { name: "artikelnummer", label: "Artikelnummer", type: "text", placeholder: "bv. 100234", required: true, mono: true },
+  { name: "omschrijving", label: "Omschrijving", type: "text", placeholder: "Artikelomschrijving", full: true },
+  { name: "aantal", label: "Aantal beschadigd", type: "number", placeholder: "0", required: true },
+];
+const COMMON_TAIL = [
+  { name: "prioriteit", label: "Prioriteit", type: "select", options: ["Laag", "Normaal", "Hoog"], required: true },
+  { name: "melder", label: "Gemeld door", type: "text", placeholder: "Naam" },
+  { name: "opmerkingen", label: "Opmerkingen", type: "textarea", placeholder: "Extra details over de schade…", full: true },
+];
+const STAGES = [
+  { key: "inkomend", stap: "Ontvangst", label: "Inkomende goederen", sub: "Schade vastgesteld bij ontvangst", icon: "arrow-down-to-line",
+    accent: { chip: "bg-sky-100 text-sky-700", dot: "bg-sky-500", iconBox: "bg-sky-50 text-sky-600 ring-sky-100",
+      cardIdle: "border-slate-200 hover:border-sky-400", btn: "bg-sky-600 hover:bg-sky-700", focus: "focus:border-sky-500 focus:ring-sky-500" },
+    fields: [
+      { name: "leverancier", label: "Leverancier", type: "text", placeholder: "Naam leverancier" },
+      { name: "inkooporder", label: "Inkooporder-nr.", type: "text", placeholder: "BC inkooporder", mono: true },
+      { name: "ontvangstdatum", label: "Ontvangstdatum", type: "date" },
+      { name: "vervoerder", label: "Vervoerder", type: "text", placeholder: "Transporteur" },
+      { name: "typeSchade", label: "Soort schade", type: "select", options: ["Transportschade", "Verpakkingsschade", "Productdefect", "Nat / vochtig", "Ontbrekend"] },
+      { name: "actie", label: "Actie bij ontvangst", type: "select", options: ["Geweigerd", "Onder voorbehoud aangenomen", "Volledig aangenomen", "Retour naar leverancier"] },
+    ] },
+  { key: "voorraad", stap: "Voorraad", label: "Schade aan voorraad", sub: "Tijdens opslag of orderverwerking", icon: "warehouse",
+    accent: { chip: "bg-amber-100 text-amber-800", dot: "bg-amber-500", iconBox: "bg-amber-50 text-amber-600 ring-amber-100",
+      cardIdle: "border-slate-200 hover:border-amber-400", btn: "bg-amber-500 hover:bg-amber-600", focus: "focus:border-amber-500 focus:ring-amber-500" },
+    fields: [
+      { name: "locatie", label: "Locatie / bin", type: "text", placeholder: "bv. A-12-03", mono: true },
+      { name: "oorzaak", label: "Oorzaak", type: "select", options: ["Handling (val)", "Heftruck / transpallet", "THT verlopen", "Waterschade", "Mispick-schade", "Onbekend"] },
+      { name: "ontdektBij", label: "Ontdekt bij", type: "select", options: ["Orderpicking", "Cyclustelling", "Routine-inspectie", "Bijvullen"] },
+      { name: "gekoppeldeOrder", label: "Gekoppelde order (optioneel)", type: "text", placeholder: "Verkooporder tijdens picking", mono: true },
+      { name: "afhandeling", label: "Afhandeling", type: "select", options: ["Afgeschreven", "Afgeprijsd", "Hersteld", "In quarantaine"] },
+    ] },
+  { key: "uitgaand", stap: "Verzending", label: "Uitgaande goederen", sub: "Schade vóór of bij verzending", icon: "package-check",
+    accent: { chip: "bg-violet-100 text-violet-700", dot: "bg-violet-500", iconBox: "bg-violet-50 text-violet-600 ring-violet-100",
+      cardIdle: "border-slate-200 hover:border-violet-400", btn: "bg-violet-600 hover:bg-violet-700", focus: "focus:border-violet-500 focus:ring-violet-500" },
+    fields: [
+      { name: "klant", label: "Klant", type: "text", placeholder: "Naam klant" },
+      { name: "verkooporder", label: "Verkooporder-nr.", type: "text", placeholder: "BC verkooporder", mono: true },
+      { name: "ontdektTijdens", label: "Ontdekt tijdens", type: "select", options: ["Verpakken", "Laden", "Eindcontrole"] },
+      { name: "vervoerder", label: "Vervoerder", type: "text", placeholder: "Transporteur" },
+      { name: "actie", label: "Actie", type: "select", options: ["Opnieuw picken", "Vervangen", "Order gesplitst", "Verzending uitgesteld"] },
+    ] },
+  { key: "levering", stap: "Levering", label: "Schade bij levering", sub: "Na aflevering gemeld", icon: "truck",
+    accent: { chip: "bg-rose-100 text-rose-700", dot: "bg-rose-500", iconBox: "bg-rose-50 text-rose-600 ring-rose-100",
+      cardIdle: "border-slate-200 hover:border-rose-400", btn: "bg-rose-600 hover:bg-rose-700", focus: "focus:border-rose-500 focus:ring-rose-500" },
+    fields: [
+      { name: "klant", label: "Klant", type: "text", placeholder: "Naam klant" },
+      { name: "verkooporder", label: "Verkooporder-nr.", type: "text", placeholder: "BC verkooporder", mono: true },
+      { name: "leveringsdatum", label: "Leveringsdatum", type: "date" },
+      { name: "vervoerder", label: "Vervoerder", type: "text", placeholder: "Transporteur" },
+      { name: "gemeldDoor", label: "Gemeld door", type: "select", options: ["Klant", "Chauffeur", "Vertegenwoordiger"] },
+      { name: "claimVervoerder", label: "Claim bij vervoerder", type: "select", options: ["Ja", "Nee", "In behandeling"] },
+      { name: "oplossing", label: "Oplossing", type: "select", options: ["Creditnota", "Herlevering", "Retour", "Geen actie"] },
+    ] },
+];
+const stageByKey = (k) => STAGES.find((s) => s.key === k);
+const KEY_TO_FASE = { inkomend: "Ontvangst", voorraad: "Voorraad", uitgaand: "Verzending", levering: "Levering" };
+const FASE_TO_KEY = Object.fromEntries(Object.entries(KEY_TO_FASE).map(([k, v]) => [v, k]));
+
+const STATUS_FLOW = ["Nieuw", "In behandeling", "Afgehandeld"];
+const STATUS_META = {
+  "Nieuw": { chip: "bg-blue-100 text-blue-700", icon: "circle", ic: "text-blue-500" },
+  "In behandeling": { chip: "bg-amber-100 text-amber-800", icon: "clock", ic: "text-amber-500" },
+  "Afgehandeld": { chip: "bg-emerald-100 text-emerald-700", icon: "check-circle-2", ic: "text-emerald-500" },
+};
+const PRIO_CHIP = {
+  Hoog: "bg-rose-100 text-rose-700 ring-rose-200",
+  Normaal: "bg-slate-100 text-slate-600 ring-slate-200",
+  Laag: "bg-slate-50 text-slate-500 ring-slate-200",
+};
+
+// app-veld -> SharePoint-kolom
+const COLS = {
+  prioriteit: { col: "Prioriteit" }, warehouse: { col: "Magazijn" }, artikelnummer: { col: "Artikelnummer" },
+  omschrijving: { col: "Omschrijving" }, aantal: { col: "Aantal", kind: "number" }, melder: { col: "Melder" },
+  opmerkingen: { col: "Opmerkingen" }, aangemaakt: { col: "Melddatum", kind: "date" }, fotos: { col: "Fotos", kind: "json" },
+  leverancier: { col: "Leverancier" }, inkooporder: { col: "Inkooporder" }, ontvangstdatum: { col: "Ontvangstdatum", kind: "date" },
+  vervoerder: { col: "Vervoerder" }, typeSchade: { col: "SoortSchade" }, actie: { col: "Actie" },
+  locatie: { col: "Locatie" }, oorzaak: { col: "Oorzaak" }, ontdektBij: { col: "OntdektBij" },
+  gekoppeldeOrder: { col: "GekoppeldeOrder" }, afhandeling: { col: "Afhandeling" }, klant: { col: "Klant" },
+  verkooporder: { col: "Verkooporder" }, ontdektTijdens: { col: "OntdektTijdens" }, leveringsdatum: { col: "Leveringsdatum", kind: "date" },
+  gemeldDoor: { col: "GemeldDoor" }, claimVervoerder: { col: "ClaimVervoerder" }, oplossing: { col: "Oplossing" },
+};
+const COLUMN_DEFS = [
+  { name: "Fase", choice: { choices: ["Ontvangst", "Voorraad", "Verzending", "Levering"], displayAs: "dropDownMenu" } },
+  { name: "Status", choice: { choices: STATUS_FLOW } },
+  { name: "Prioriteit", choice: { choices: ["Laag", "Normaal", "Hoog"] } },
+  { name: "Magazijn", choice: { choices: ["LAAKDAL", "STORA"] } },
+  { name: "Artikelnummer", text: {} }, { name: "Omschrijving", text: {} }, { name: "Aantal", number: {} },
+  { name: "Melder", text: {} }, { name: "Opmerkingen", text: { allowMultipleLines: true } },
+  { name: "Melddatum", dateTime: { format: "dateOnly", displayAs: "standard" } },
+  { name: "Fotos", text: { allowMultipleLines: true } },
+  { name: "Leverancier", text: {} }, { name: "Inkooporder", text: {} },
+  { name: "Ontvangstdatum", dateTime: { format: "dateOnly", displayAs: "standard" } },
+  { name: "Vervoerder", text: {} },
+  { name: "SoortSchade", choice: { choices: ["Transportschade", "Verpakkingsschade", "Productdefect", "Nat / vochtig", "Ontbrekend"] } },
+  { name: "Actie", text: {} }, { name: "Locatie", text: {} },
+  { name: "Oorzaak", choice: { choices: ["Handling (val)", "Heftruck / transpallet", "THT verlopen", "Waterschade", "Mispick-schade", "Onbekend"] } },
+  { name: "OntdektBij", choice: { choices: ["Orderpicking", "Cyclustelling", "Routine-inspectie", "Bijvullen"] } },
+  { name: "GekoppeldeOrder", text: {} },
+  { name: "Afhandeling", choice: { choices: ["Afgeschreven", "Afgeprijsd", "Hersteld", "In quarantaine"] } },
+  { name: "Klant", text: {} }, { name: "Verkooporder", text: {} },
+  { name: "OntdektTijdens", choice: { choices: ["Verpakken", "Laden", "Eindcontrole"] } },
+  { name: "Leveringsdatum", dateTime: { format: "dateOnly", displayAs: "standard" } },
+  { name: "GemeldDoor", choice: { choices: ["Klant", "Chauffeur", "Vertegenwoordiger"] } },
+  { name: "ClaimVervoerder", choice: { choices: ["Ja", "Nee", "In behandeling"] } },
+  { name: "Oplossing", choice: { choices: ["Creditnota", "Herlevering", "Retour", "Geen actie"] } },
+];
+
+/* ------------------------------------------------------------------ *
+ *  Helpers
+ * ------------------------------------------------------------------ */
+const $ = (sel, root = document) => root.querySelector(sel);
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const esc = (v) => String(v == null ? "" : v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fmtDate = (iso) => { if (!iso) return "—"; try { return new Date(iso).toLocaleDateString("nl-BE", { day: "2-digit", month: "short", year: "numeric" }); } catch { return iso; } };
+const fmtDateTime = (iso) => { if (!iso) return ""; try { return new Date(iso).toLocaleString("nl-BE", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }); } catch { return iso; } };
+const icons = () => window.lucide && window.lucide.createIcons();
+
+/* ------------------------------------------------------------------ *
+ *  MSAL — laden uit meerdere bronnen (met fallback) + auth
+ * ------------------------------------------------------------------ */
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src; s.async = true;
+    s.onload = () => resolve(src);
+    s.onerror = () => reject(new Error("kon niet laden: " + src));
+    document.head.appendChild(s);
+  });
+}
+async function loadMsal() {
+  if (window.msal) return;
+  const sources = [
+    "https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.4/lib/msal-browser.min.js",  // meest betrouwbaar
+    "https://unpkg.com/@azure/msal-browser@2.38.4/lib/msal-browser.min.js",
+    "https://alcdn.msauth.net/browser/2.38.4/js/msal-browser.min.js",                   // Microsoft CDN als laatste fallback
+  ];
+  for (const src of sources) {
+    try { await loadScript(src); if (window.msal) return; } catch (e) { console.warn("MSAL-bron faalde:", src); }
+  }
+  throw new Error("MSAL kon uit geen enkele bron geladen worden.");
+}
+
+let pca = null;
+async function initAuth() {
+  await loadMsal();
+  pca = new msal.PublicClientApplication({
+    auth: { clientId: CONFIG.clientId, authority: `https://login.microsoftonline.com/${CONFIG.tenantId}`, redirectUri: CONFIG.redirectUri },
+    cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false },
+  });
+  const resp = await pca.handleRedirectPromise();
+  if (resp && resp.account) pca.setActiveAccount(resp.account);
+  const acc = pca.getActiveAccount() || pca.getAllAccounts()[0];
+  if (acc) pca.setActiveAccount(acc);
+  return acc || null;
+}
+function login() { pca.loginRedirect({ scopes: CONFIG.scopes }); }
+function logout() { pca.logoutRedirect(); }
+async function getToken() {
+  const account = pca.getActiveAccount();
+  const r = await pca.acquireTokenSilent({ scopes: CONFIG.scopes, account }).catch(async () => {
+    await pca.acquireTokenRedirect({ scopes: CONFIG.scopes, account }); return null;
+  });
+  return r && r.accessToken;
+}
+function isAdmin() {
+  const a = pca && pca.getActiveAccount();
+  const roles = (a && a.idTokenClaims && a.idTokenClaims.roles) || [];
+  return roles.includes(CONFIG.adminRole);
+}
+
+/* ------------------------------------------------------------------ *
+ *  Graph datalaag
+ * ------------------------------------------------------------------ */
+async function graph(pathOrUrl, { method = "GET", body, headers } = {}) {
+  const token = await getToken();
+  const url = pathOrUrl.startsWith("http") ? pathOrUrl : GRAPH + pathOrUrl;
+  const res = await fetch(url, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}), ...(headers || {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(`Graph ${method} ${res.status}: ${await res.text().catch(() => "")}`);
+  return res.status === 204 ? null : res.json();
+}
+
+let _ctx = null;
+let INTERNAL = null; // kolom-weergavenaam/naam -> échte interne naam
+function internal(name) { return (INTERNAL && INTERNAL[name]) || name; }
+async function getSiteId() {
+  const site = await graph(`/sites/${CONFIG.siteHostname}:${CONFIG.sitePath}`);
+  return site.id;
+}
+async function ensureList() {
+  if (_ctx) return _ctx;
+  const siteId = await getSiteId();
+  const found = await graph(`/sites/${siteId}/lists?$filter=displayName eq '${encodeURIComponent(CONFIG.listName)}'`);
+  if (!found.value || !found.value.length) throw new Error(`SharePoint-lijst "${CONFIG.listName}" niet gevonden. Maak de lijst eerst aan op de SharePoint-site.`);
+  const listId = found.value[0].id;
+  _ctx = { siteId, listId };
+  // Interne kolomnamen ophalen zodat weergavenaam en interne naam altijd kloppen.
+  const cols = await graph(`/sites/${siteId}/lists/${listId}/columns?$select=name,displayName`);
+  INTERNAL = {};
+  (cols.value || []).forEach((c) => { if (c.displayName) INTERNAL[c.displayName] = c.name; INTERNAL[c.name] = c.name; });
+  return _ctx;
+}
+function encode(def, value) {
+  if (def.kind === "number") return Number(value) || 0;
+  if (def.kind === "date") return `${String(value).slice(0, 10)}T00:00:00Z`;
+  if (def.kind === "json") return JSON.stringify(value || []);
+  return value;
+}
+function toFields(rec) {
+  const f = {};
+  if (rec.id != null) f[internal("Title")] = rec.id;
+  if (rec.type) f[internal("Fase")] = KEY_TO_FASE[rec.type] || rec.type;
+  if (rec.status) f[internal("Status")] = rec.status;
+  for (const [k, def] of Object.entries(COLS)) {
+    const v = rec[k];
+    if (v === undefined || v === null || v === "") continue;
+    f[internal(def.col)] = encode(def, v);
+  }
+  return f;
+}
+function fromItem(item) {
+  const f = item.fields || {};
+  const gv = (n) => f[internal(n)];
+  const rec = { spId: item.id, id: gv("Title"), status: gv("Status") || "Nieuw", type: FASE_TO_KEY[gv("Fase")] || gv("Fase") };
+  for (const [k, def] of Object.entries(COLS)) {
+    const raw = gv(def.col);
+    if (raw === undefined || raw === null || raw === "") continue;
+    if (def.kind === "date") rec[k] = String(raw).slice(0, 10);
+    else if (def.kind === "number") rec[k] = Number(raw);
+    else if (def.kind === "json") { try { rec[k] = JSON.parse(raw); } catch { rec[k] = []; } }
+    else rec[k] = raw;
+  }
+  return rec;
+}
+async function fetchReports() {
+  const { siteId, listId } = await ensureList();
+  const out = [];
+  let url = `/sites/${siteId}/lists/${listId}/items?expand=fields&$top=200`;
+  while (url) { const d = await graph(url); out.push(...(d.value || []).map(fromItem)); url = d["@odata.nextLink"] || null; }
+  return out.sort((a, b) => (String(a.aangemaakt) < String(b.aangemaakt) ? 1 : -1));
+}
+async function createReport(rec) {
+  const { siteId, listId } = await ensureList();
+  const created = await graph(`/sites/${siteId}/lists/${listId}/items`, { method: "POST", body: { fields: toFields(rec) } });
+  return fromItem(created);
+}
+async function updateReport(spId, patch) {
+  const { siteId, listId } = await ensureList();
+  await graph(`/sites/${siteId}/lists/${listId}/items/${spId}/fields`, { method: "PATCH", body: toFields(patch) });
+}
+async function deleteReport(spId) {
+  const { siteId, listId } = await ensureList();
+  await graph(`/sites/${siteId}/lists/${listId}/items/${spId}`, { method: "DELETE" });
+}
+
+/* ------------------------------------------------------------------ *
+ *  Instellingen (e-mailontvangers) — in een aparte SharePoint-lijst,
+ *  zodat een beheerder de adressen in de app kan wijzigen (niet in code).
+ * ------------------------------------------------------------------ */
+let _settingsCtx = null;
+async function ensureSettingsList() {
+  if (_settingsCtx) return _settingsCtx;
+  const siteId = await getSiteId();
+  const found = await graph(`/sites/${siteId}/lists?$filter=displayName eq '${encodeURIComponent(CONFIG.settingsList)}'`);
+  if (!found.value || !found.value.length) throw new Error(`SharePoint-lijst "${CONFIG.settingsList}" niet gevonden.`);
+  _settingsCtx = { siteId, listId: found.value[0].id };
+  return _settingsCtx;
+}
+async function loadSettings() {
+  try {
+    const { siteId, listId } = await ensureSettingsList();
+    const d = await graph(`/sites/${siteId}/lists/${listId}/items?expand=fields&$top=10`);
+    const items = d.value || [];
+    const item = items.find((it) => (it.fields || {}).Title === "config") || items[0];
+    if (!item) return { spId: null, enabled: true, recipients: [] };
+    const f = item.fields || {};
+    let recipients = []; try { recipients = JSON.parse(f.Ontvangers || "[]"); } catch { recipients = []; }
+    return { spId: item.id, enabled: f.MeldingenAan !== false, recipients };
+  } catch (e) { console.warn("Instellingen laden mislukt:", e); return { spId: null, enabled: true, recipients: [] }; }
+}
+async function saveSettings(settings) {
+  const { siteId, listId } = await ensureSettingsList();
+  const fields = { Title: "config", Ontvangers: JSON.stringify(settings.recipients || []), MeldingenAan: !!settings.enabled };
+  if (settings.spId) await graph(`/sites/${siteId}/lists/${listId}/items/${settings.spId}/fields`, { method: "PATCH", body: fields });
+  else { const created = await graph(`/sites/${siteId}/lists/${listId}/items`, { method: "POST", body: { fields } }); settings.spId = created.id; }
+  return settings;
+}
+
+/* ------------------------------------------------------------------ *
+ *  E-mailmelding bij een nieuwe schademelding (via Graph /me/sendMail)
+ * ------------------------------------------------------------------ */
+function appCaseUrl(id) { return `${location.origin}${location.pathname}?case=${encodeURIComponent(id)}`; }
+async function sendMail(recipients, subject, html) {
+  const to = recipients.map((r) => ({ emailAddress: { address: typeof r === "string" ? r : r.email } }));
+  await graph(`/me/sendMail`, {
+    method: "POST",
+    body: { message: { subject, body: { contentType: "HTML", content: html }, toRecipients: to }, saveToSentItems: true },
+  });
+}
+async function notifyNewCase(rec) {
+  if (!CONFIG.mailEnabled) return; // e-mail uitgeschakeld — zet mailEnabled: true zodra Mail.Send is goedgekeurd
+  const s = S.settings || {};
+  if (!s.enabled) return;
+  // Stuur enkel naar ontvangers die deze fase geselecteerd hebben
+  const actief = (s.recipients || []).filter((r) => {
+    if (!r || !r.email) return false;
+    const fasen = Array.isArray(r.fasen) && r.fasen.length ? r.fasen : ["inkomend","voorraad","uitgaand","levering"];
+    return fasen.includes(rec.type);
+  });
+  if (!actief.length) return;
+  await sendMail(actief, `Nieuwe schademelding ${rec.id} \u2014 ${stageByKey(rec.type).stap}`, buildEmailHtml(rec));
+}
+function buildEmailHtml(rec) {
+  const stage = stageByKey(rec.type);
+  const HEX = {
+    inkomend: ["#0284c7", "#e0f2fe", "#0369a1"], voorraad: ["#f59e0b", "#fef3c7", "#92400e"],
+    uitgaand: ["#7c3aed", "#ede9fe", "#6d28d9"], levering: ["#e11d48", "#ffe4e6", "#be123c"],
+  };
+  const [main, soft, dark] = HEX[rec.type] || HEX.inkomend;
+  const url = appCaseUrl(rec.id);
+  const row = (label, val) => val ? `<tr><td style="padding:6px 0;color:#64748b;font-size:13px;width:150px;vertical-align:top;">${label}</td><td style="padding:6px 0;color:#0f172a;font-size:13px;font-weight:600;">${esc(val)}</td></tr>` : "";
+  const extra = rec.klant ? row("Klant", rec.klant) : (rec.leverancier ? row("Leverancier", rec.leverancier) : "");
+  const prio = rec.prioriteit === "Hoog"
+    ? `<span style="display:inline-block;background:#ffe4e6;color:#be123c;font-size:12px;font-weight:700;padding:2px 8px;border-radius:9999px;">Hoog</span>`
+    : `<span style="color:#0f172a;font-size:13px;font-weight:600;">${esc(rec.prioriteit || "Normaal")}</span>`;
+  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f1f5f9;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:24px 12px;"><tr><td align="center">
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+        <tr><td style="background:${main};padding:20px 24px;">
+          <div style="color:#ffffff;font-size:12px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;opacity:.9;">Nieuwe schademelding</div>
+          <div style="color:#ffffff;font-size:20px;font-weight:700;margin-top:2px;">${esc(stage.stap)} · ${esc(rec.id)}</div>
+        </td></tr>
+        <tr><td style="padding:22px 24px 6px;">
+          <span style="display:inline-block;background:${soft};color:${dark};font-size:12px;font-weight:700;padding:4px 10px;border-radius:9999px;">${esc(stage.label)}</span>
+          <p style="color:#334155;font-size:14px;line-height:1.5;margin:14px 0 8px;">Er is een nieuw schadegeval geregistreerd${rec.melder ? ` door ${esc(rec.melder)}` : ""}.</p>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+            ${row("Magazijn", rec.warehouse)}
+            ${row("Artikel", [rec.artikelnummer, rec.omschrijving].filter(Boolean).join(" — "))}
+            ${row("Aantal", rec.aantal != null ? rec.aantal + " stuks" : "")}
+            ${extra}
+            <tr><td style="padding:6px 0;color:#64748b;font-size:13px;">Prioriteit</td><td style="padding:6px 0;">${prio}</td></tr>
+            ${row("Datum", fmtDate(rec.aangemaakt))}
+          </table>
+        </td></tr>
+        <tr><td style="padding:10px 24px 26px;">
+          <table role="presentation" cellpadding="0" cellspacing="0"><tr><td style="border-radius:10px;background:${main};">
+            <a href="${url}" style="display:inline-block;padding:12px 22px;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;border-radius:10px;">Bekijk in de app →</a>
+          </td></tr></table>
+        </td></tr>
+        <tr><td style="padding:14px 24px;background:#f8fafc;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:12px;">Verpa Benelux · Schademeldingen</td></tr>
+      </table>
+    </td></tr></table>
+  </body></html>`;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Gesprek per melding — reacties in een aparte SharePoint-lijst.
+ *  Iedereen mag lezen en berichten plaatsen.
+ * ------------------------------------------------------------------ */
+let _commentsCtx = null;
+async function ensureCommentsList() {
+  if (_commentsCtx) return _commentsCtx;
+  const siteId = await getSiteId();
+  const found = await graph(`/sites/${siteId}/lists?$filter=displayName eq '${encodeURIComponent(CONFIG.commentsList)}'`);
+  if (!found.value || !found.value.length) throw new Error(`SharePoint-lijst "${CONFIG.commentsList}" niet gevonden.`);
+  _commentsCtx = { siteId, listId: found.value[0].id };
+  return _commentsCtx;
+}
+async function fetchComments(meldingId) {
+  const { siteId, listId } = await ensureCommentsList();
+  const q = String(meldingId).replace(/'/g, "''");
+  const d = await graph(
+    `/sites/${siteId}/lists/${listId}/items?expand=fields&$top=200&$filter=fields/Title eq '${q}'`,
+    { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly=true" } }
+  );
+  return (d.value || [])
+    .map((it) => ({ id: it.id, auteur: (it.fields || {}).Auteur, bericht: (it.fields || {}).Bericht, datum: it.createdDateTime }))
+    .sort((a, b) => (String(a.datum) < String(b.datum) ? -1 : 1));
+}
+async function addComment(meldingId, auteur, bericht) {
+  const { siteId, listId } = await ensureCommentsList();
+  const created = await graph(`/sites/${siteId}/lists/${listId}/items`, {
+    method: "POST", body: { fields: { Title: String(meldingId), Auteur: auteur, Bericht: bericht } },
+  });
+  return { id: created.id, auteur, bericht, datum: created.createdDateTime };
+}
+
+/* Foto's ----------------------------------------------------------- */
+const CHUNK = 5 * 1024 * 1024;
+const encPath = (p) => p.split("/").map(encodeURIComponent).join("/");
+async function uploadFotos(meldingId, files) {
+  const { siteId } = await ensureList();
+  const refs = [];
+  for (const file of files) {
+    const path = `${CONFIG.attachFolder}/${meldingId}/${file.name}`;
+    const session = await graph(`/sites/${siteId}/drive/root:/${encPath(path)}:/createUploadSession`,
+      { method: "POST", body: { item: { "@microsoft.graph.conflictBehavior": "rename" } } });
+    const uploadUrl = session.uploadUrl;
+    const total = file.size; let start = 0, item = null;
+    do {
+      const end = Math.min(start + CHUNK, total);
+      const res = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Range": `bytes ${start}-${end - 1}/${total}` }, body: file.slice(start, end) });
+      if (res.status === 200 || res.status === 201) item = await res.json();
+      else if (res.status !== 202) throw new Error(`Foto-upload ${res.status}`);
+      start = end;
+    } while (start < total);
+    refs.push({ name: file.name, driveId: item.parentReference.driveId, itemId: item.id });
+  }
+  return refs;
+}
+const fotoCache = new Map();
+async function getFotoBlobUrl(ref) {
+  if (ref.url) return ref.url;
+  if (ref.itemId && fotoCache.has(ref.itemId)) return fotoCache.get(ref.itemId);
+  const token = await getToken();
+  const res = await fetch(`${GRAPH}/drives/${ref.driveId}/items/${ref.itemId}/content`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error("Foto laden mislukt");
+  const url = URL.createObjectURL(await res.blob());
+  if (ref.itemId) fotoCache.set(ref.itemId, url);
+  return url;
+}
+
+/* ==================================================================== *
+ *  STATE + VIEWS
+ * ==================================================================== */
+const S = {
+  account: null, isAdmin: false, settings: null, reports: [], loading: true, error: null,
+  view: { name: "dashboard" },
+  filters: { q: "", status: "Alle", stage: "Alle", warehouse: "Alle" },
+};
+let formPhotos = []; // { name, url, file } tijdens invullen
+
+function go(view) { S.view = view; render(); window.scrollTo(0, 0); }
+function setLoading(v) { S.loading = v; render(); }
+
+function nextId() {
+  const year = new Date().getFullYear();
+  const nums = S.reports.map((r) => r.id).filter((id) => id && id.startsWith(`SCH-${year}-`)).map((id) => parseInt(id.split("-")[2], 10));
+  return `SCH-${year}-${String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0")}`;
+}
+
+/* ---------- Shell ---------- */
+function shell(content) {
+  const name = S.account ? esc(S.account.name || S.account.username || "") : "";
+  return `
+  <header class="sticky top-0 z-20 border-b border-slate-200 bg-white/85 backdrop-blur">
+    <div class="mx-auto flex max-w-5xl items-center justify-between px-4 py-3 sm:px-6">
+      <button data-nav='dashboard' class="flex items-center gap-2.5 text-left">
+        <span class="grid h-9 w-9 place-items-center rounded-lg bg-slate-900 text-white"><i data-lucide="alert-triangle" class="w-5 h-5"></i></span>
+        <span>
+          <span class="block text-sm font-semibold leading-tight tracking-tight">Schademeldingen</span>
+          <span class="block text-xs leading-tight text-slate-400">Verpa Benelux · Magazijn</span>
+        </span>
+      </button>
+      <div class="flex items-center gap-2 text-xs text-slate-500">
+        ${S.isAdmin ? `<span class="hidden rounded-full bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-white sm:inline">Beheerder</span>` : ""}
+        <span class="hidden max-w-[9rem] truncate sm:inline">${name}</span>
+        ${S.isAdmin && CONFIG.mailEnabled ? `<button data-nav='settings' title="E-mailinstellingen" class="grid h-8 w-8 place-items-center rounded-lg hover:bg-slate-100"><i data-lucide="settings" class="w-4 h-4"></i></button>` : ""}
+        <button data-action='logout' title="Afmelden" class="grid h-8 w-8 place-items-center rounded-lg hover:bg-slate-100"><i data-lucide="log-out" class="w-4 h-4"></i></button>
+      </div>
+    </div>
+  </header>
+  <main class="mx-auto max-w-5xl px-4 pb-24 pt-6 sm:px-6">${content}</main>`;
+}
+
+/* ---------- Dashboard ---------- */
+function viewDashboard() {
+  const openCounts = {}; STAGES.forEach((s) => (openCounts[s.key] = 0));
+  S.reports.forEach((r) => { if (r.status !== "Afgehandeld") openCounts[r.type] = (openCounts[r.type] || 0) + 1; });
+  const open = S.reports.filter((r) => r.status !== "Afgehandeld").length;
+  const hoog = S.reports.filter((r) => r.prioriteit === "Hoog" && r.status !== "Afgehandeld").length;
+  const done = S.reports.filter((r) => r.status === "Afgehandeld").length;
+
+  const cards = STAGES.map((s, i) => {
+    const badge = openCounts[s.key] > 0
+      ? `<span class="rounded-full px-2 py-0.5 text-xs font-semibold ${s.accent.chip}">${openCounts[s.key]} <span class="hidden sm:inline">open</span></span>`
+      : `<span class="rounded-full bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-400">0 <span class="hidden sm:inline">open</span></span>`;
+    const chevron = i < STAGES.length - 1 ? `<div class="hidden items-center justify-center text-slate-300 sm:flex"><i data-lucide="chevron-right" class="w-5 h-5"></i></div>` : "";
+    return `
+      <button data-newstage='${s.key}' class="group relative flex flex-col rounded-xl border bg-white p-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md sm:flex-1 sm:p-4 ${s.accent.cardIdle}">
+        <div class="flex items-start justify-between">
+          <span class="grid h-9 w-9 place-items-center rounded-lg ring-1 sm:h-10 sm:w-10 ${s.accent.iconBox}"><i data-lucide="${s.icon}" class="w-5 h-5"></i></span>
+          ${badge}
+        </div>
+        <div class="mt-2.5 sm:mt-3">
+          <div class="text-[11px] font-medium uppercase tracking-wide text-slate-400">Fase ${i + 1}</div>
+          <div class="text-sm font-semibold">${s.stap}</div>
+          <div class="mt-0.5 text-xs leading-snug text-slate-500">${s.sub}</div>
+        </div>
+        <div class="mt-2.5 flex items-center gap-1 text-xs font-medium text-slate-400 group-hover:text-slate-600 sm:mt-3"><i data-lucide="plus" class="w-3.5 h-3.5"></i> Melding maken</div>
+      </button>${chevron}`;
+  }).join("");
+
+  const rows = filteredReports().map((r) => {
+    const stage = stageByKey(r.type); const st = STATUS_META[r.status] || STATUS_META["Nieuw"];
+    return `
+      <button data-open='${esc(r.id)}' class="flex w-full items-center gap-3 border-t border-slate-100 px-4 py-3 text-left transition first:border-t-0 hover:bg-slate-50">
+        <span class="h-8 w-1 shrink-0 rounded-full ${stage.accent.dot}"></span>
+        <div class="min-w-0 flex-1">
+          <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span class="font-mono text-xs text-slate-400">${esc(r.id)}</span>
+            <span class="rounded-full px-2 py-0.5 text-[11px] font-medium ${stage.accent.chip}">${stage.stap}</span>
+          </div>
+          <div class="mt-0.5 truncate text-sm font-medium text-slate-800"><span class="font-mono text-slate-500">${esc(r.artikelnummer || "")}</span>${r.omschrijving ? ` · ${esc(r.omschrijving)}` : ""}</div>
+          <div class="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-slate-400">
+            <span class="inline-flex items-center gap-1"><i data-lucide="map-pin" class="w-3 h-3"></i>${esc(r.warehouse || "")}</span>
+            <span class="inline-flex items-center gap-1"><i data-lucide="boxes" class="w-3 h-3"></i>${esc(r.aantal || 0)} st.</span>
+            ${(r.klant || r.leverancier) ? `<span class="truncate">${esc(r.klant || r.leverancier)}</span>` : ""}
+            <span>${fmtDate(r.aangemaakt)}</span>
+          </div>
+        </div>
+        <div class="flex shrink-0 flex-col items-end gap-1.5">
+          <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${st.chip}"><i data-lucide="${st.icon}" class="w-3 h-3 ${st.ic}"></i> ${r.status}</span>
+          <span class="rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 ring-inset ${PRIO_CHIP[r.prioriteit] || PRIO_CHIP.Normaal}">${esc(r.prioriteit || "Normaal")}</span>
+        </div>
+      </button>`;
+  }).join("");
+
+  const listBlock = filteredReports().length
+    ? `<div class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">${rows}</div>`
+    : `<div class="rounded-xl border border-dashed border-slate-200 bg-white p-10 text-center">
+         <i data-lucide="clipboard-list" class="mx-auto w-8 h-8 text-slate-300"></i>
+         <p class="mt-2 text-sm font-medium text-slate-600">Geen meldingen gevonden</p>
+         <p class="text-xs text-slate-400">Pas de filters aan of maak een nieuwe melding via de fasen hierboven.</p>
+       </div>`;
+
+  const filterSel = (id, value, options, labelFn) =>
+    `<select data-filter='${id}' class="w-full min-w-0 truncate rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm text-slate-600 outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-200 sm:w-auto sm:px-3">
+      ${options.map((o) => `<option value='${esc(o)}' ${o === value ? "selected" : ""}>${esc(labelFn(o))}</option>`).join("")}
+    </select>`;
+
+  return shell(`
+    <section>
+      <div class="mb-3">
+        <h1 class="text-lg font-semibold tracking-tight">Waar is de schade ontstaan?</h1>
+        <p class="text-sm text-slate-500">Kies een fase in de goederenstroom om een melding te maken.</p>
+      </div>
+      <div class="grid grid-cols-2 gap-2.5 sm:flex sm:flex-row sm:items-stretch sm:gap-3">${cards}</div>
+    </section>
+
+    <section class="mt-8">
+      <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <h2 class="text-base font-semibold tracking-tight">Meldingen</h2>
+          <div class="flex items-center gap-3 text-xs text-slate-500">
+            <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-blue-500"></span>${open} open</span>
+            <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-rose-500"></span>${hoog} hoog</span>
+            <span class="inline-flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-emerald-500"></span>${done} afgehandeld</span>
+          </div>
+        </div>
+        <button data-action='export' class="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm hover:bg-slate-50"><i data-lucide="download" class="w-3.5 h-3.5"></i> Export CSV</button>
+      </div>
+      <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div class="relative flex-1">
+          <i data-lucide="search" class="pointer-events-none absolute left-3 top-1/2 w-4 h-4 -translate-y-1/2 text-slate-400"></i>
+          <input data-filter='q' value='${esc(S.filters.q)}' placeholder="Zoek op nr., artikel, klant of leverancier…" class="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm outline-none placeholder:text-slate-400 focus:border-slate-400 focus:ring-2 focus:ring-slate-200" />
+        </div>
+        <div class="grid grid-cols-3 gap-2 sm:flex sm:gap-2">
+          ${filterSel("stage", S.filters.stage, ["Alle", ...STAGES.map((s) => s.key)], (v) => v === "Alle" ? "Alle fasen" : stageByKey(v).stap)}
+          ${filterSel("status", S.filters.status, ["Alle", ...STATUS_FLOW], (v) => v === "Alle" ? "Alle statussen" : v)}
+          ${filterSel("warehouse", S.filters.warehouse, ["Alle", "LAAKDAL", "STORA"], (v) => v === "Alle" ? "Alle magazijnen" : v)}
+        </div>
+      </div>
+      ${listBlock}
+    </section>`);
+}
+
+function filteredReports() {
+  const f = S.filters; const needle = f.q.trim().toLowerCase();
+  return S.reports
+    .filter((r) => f.status === "Alle" || r.status === f.status)
+    .filter((r) => f.stage === "Alle" || r.type === f.stage)
+    .filter((r) => f.warehouse === "Alle" || r.warehouse === f.warehouse)
+    .filter((r) => !needle || [r.id, r.artikelnummer, r.omschrijving, r.klant, r.leverancier, r.verkooporder, r.inkooporder].filter(Boolean).join(" ").toLowerCase().includes(needle));
+}
+
+/* ---------- Formulier ---------- */
+function fieldHtml(f, value, focusCls) {
+  const base = `w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none placeholder:text-slate-400 focus:ring-2 ${focusCls}`;
+  const req = f.required ? `<span class="text-rose-500"> *</span>` : "";
+  let control;
+  if (f.type === "select") {
+    control = `<select data-field='${f.name}' class="${base}"><option value="">— Kies —</option>${f.options.map((o) => `<option ${o === value ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+  } else if (f.type === "textarea") {
+    control = `<textarea data-field='${f.name}' rows="3" placeholder="${esc(f.placeholder || "")}" class="${base} resize-none">${esc(value || "")}</textarea>`;
+  } else {
+    const t = f.type === "number" ? "number" : f.type === "date" ? "date" : "text";
+    control = `<input data-field='${f.name}' type="${t}" value='${esc(value || "")}' placeholder="${esc(f.placeholder || "")}" class="${base} ${f.mono ? "font-mono" : ""}" />`;
+  }
+  return `<div class="${f.full ? "sm:col-span-2" : ""}"><label class="mb-1.5 block text-sm font-medium text-slate-700">${esc(f.label)}${req}</label>${control}</div>`;
+}
+function viewForm(stageKey) {
+  const stage = stageByKey(stageKey);
+  const fields = [...COMMON_HEAD, ...stage.fields, ...COMMON_TAIL];
+  const id = nextId();
+  const defaults = {}; fields.forEach((f) => { if (f.type === "date") defaults[f.name] = todayISO(); if (f.name === "prioriteit") defaults[f.name] = "Normaal"; });
+  return shell(`
+    <button data-nav='dashboard' class="mb-4 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800"><i data-lucide="chevron-left" class="w-4 h-4"></i> Terug</button>
+    <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div class="flex items-center gap-3 border-b border-slate-100 px-4 py-4 sm:px-5">
+        <span class="grid h-11 w-11 place-items-center rounded-xl ring-1 ${stage.accent.iconBox}"><i data-lucide="${stage.icon}" class="w-6 h-6"></i></span>
+        <div><div class="text-[11px] font-medium uppercase tracking-wide text-slate-400">Nieuwe schademelding</div><div class="text-base font-semibold tracking-tight">${stage.label}</div></div>
+        <span class="ml-auto font-mono text-xs text-slate-400">${id}</span>
+      </div>
+      <div id="formfields" data-stage='${stageKey}' data-id='${id}' class="grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 sm:p-5">
+        ${fields.map((f) => fieldHtml(f, defaults[f.name], stage.accent.focus)).join("")}
+        <div class="sm:col-span-2">
+          <label class="mb-1.5 block text-sm font-medium text-slate-700">Foto's</label>
+          <div class="flex flex-wrap items-center gap-2">
+            <label class="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">
+              <i data-lucide="camera" class="w-4 h-4"></i> Foto maken
+              <input type="file" accept="image/*" capture="environment" class="hidden" data-addfiles />
+            </label>
+            <label class="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">
+              <i data-lucide="image-plus" class="w-4 h-4"></i> Uit galerij
+              <input type="file" accept="image/*" multiple class="hidden" data-addfiles />
+            </label>
+          </div>
+          <div id="formthumbs" class="mt-3"></div>
+        </div>
+      </div>
+      <div class="flex items-center justify-end gap-2 border-t border-slate-100 bg-slate-50 px-4 py-4 sm:px-5">
+        <button data-nav='dashboard' class="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">Annuleren</button>
+        <button data-action='save' class="rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-sm ${stage.accent.btn}">Melding opslaan</button>
+      </div>
+    </div>`);
+}
+function renderFormThumbs() {
+  const box = $("#formthumbs"); if (!box) return;
+  box.innerHTML = thumbsHtml(formPhotos, true);
+  icons();
+  hydrateThumbs(box, formPhotos);
+}
+
+/* ---------- Detail ---------- */
+function viewDetail(id) {
+  const r = S.reports.find((x) => x.id === id);
+  if (!r) return shell(`<p class="text-slate-500">Melding niet gevonden.</p>`);
+  const stage = stageByKey(r.type); const st = STATUS_META[r.status] || STATUS_META["Nieuw"];
+  const detailFields = [...COMMON_HEAD, ...stage.fields, ...COMMON_TAIL];
+  const defs = detailFields.map((f) => {
+    const v = r[f.name]; if (v === undefined || v === "" || v === null) return "";
+    const val = f.name === "aantal" ? `${v} stuks` : esc(v);
+    return `<div class="${f.full ? "sm:col-span-2" : ""}"><dt class="text-xs font-medium uppercase tracking-wide text-slate-400">${esc(f.label)}</dt><dd class="mt-0.5 text-sm text-slate-800 ${f.mono ? "font-mono" : ""}">${val}</dd></div>`;
+  }).join("");
+  const statusBtns = STATUS_FLOW.map((s) => {
+    const active = r.status === s;
+    return `<button data-status='${s}' class="rounded-full px-3 py-1 text-xs font-medium transition ${active ? "bg-slate-900 text-white" : "bg-white text-slate-500 ring-1 ring-slate-200 hover:bg-slate-100"}">${s}</button>`;
+  }).join("");
+  const fotoBlock = (r.fotos && r.fotos.length)
+    ? `<div class="sm:col-span-2"><dt class="text-xs font-medium uppercase tracking-wide text-slate-400">Foto's</dt><dd id="detailthumbs" class="mt-1.5"></dd></div>` : "";
+
+  return shell(`
+    <button data-nav='dashboard' class="mb-4 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800"><i data-lucide="chevron-left" class="w-4 h-4"></i> Terug naar overzicht</button>
+    <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div class="flex flex-wrap items-center gap-3 border-b border-slate-100 px-4 py-4 sm:px-5">
+        <span class="grid h-11 w-11 place-items-center rounded-xl ring-1 ${stage.accent.iconBox}"><i data-lucide="${stage.icon}" class="w-6 h-6"></i></span>
+        <div class="min-w-0">
+          <div class="flex items-center gap-2"><span class="font-mono text-xs text-slate-400">${esc(r.id)}</span><span class="rounded-full px-2 py-0.5 text-[11px] font-medium ${stage.accent.chip}">${stage.stap}</span></div>
+          <div class="truncate text-base font-semibold tracking-tight">${esc(r.omschrijving || r.artikelnummer || "")}</div>
+        </div>
+        <span class="ml-auto inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${st.chip}"><i data-lucide="${st.icon}" class="w-3.5 h-3.5 ${st.ic}"></i> ${r.status}</span>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 border-b border-slate-100 bg-slate-50 px-4 py-3 sm:px-5">
+        <span class="mr-1 text-xs font-medium text-slate-500">Status:</span>${statusBtns}
+      </div>
+      <dl class="grid grid-cols-1 gap-x-6 gap-y-4 p-4 sm:grid-cols-2 sm:gap-x-8 sm:p-5">
+        ${defs}
+        <div><dt class="text-xs font-medium uppercase tracking-wide text-slate-400">Aangemaakt</dt><dd class="mt-0.5 text-sm text-slate-800">${fmtDate(r.aangemaakt)}</dd></div>
+        ${fotoBlock}
+      </dl>
+      <div class="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-4 py-4 sm:px-5">
+        ${S.isAdmin
+          ? `<button data-action='delete' data-id='${esc(r.id)}' class="inline-flex items-center gap-1.5 text-sm font-medium text-slate-400 hover:text-rose-600"><i data-lucide="trash-2" class="w-4 h-4"></i> Verwijderen</button>`
+          : `<span class="inline-flex items-center gap-1.5 text-xs text-slate-400"><i data-lucide="lock" class="w-3.5 h-3.5"></i> Alleen beheerders kunnen verwijderen</span>`}
+      </div>
+    </div>
+
+    <div class="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div class="flex items-center gap-2 border-b border-slate-100 px-4 py-3 sm:px-5">
+        <i data-lucide="messages-square" class="w-4 h-4 text-slate-500"></i>
+        <span class="text-sm font-semibold tracking-tight">Gesprek</span>
+      </div>
+      <div id="gesprek" class="max-h-96 overflow-y-auto px-4 py-4 sm:px-5"></div>
+      <div class="border-t border-slate-100 bg-slate-50 px-4 py-3 sm:px-5">
+        <textarea id="comment-input" rows="2" placeholder="Schrijf een bericht… (Ctrl/⌘ + Enter om te versturen)" class="w-full resize-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-200"></textarea>
+        <div class="mt-2 flex justify-end">
+          <button data-comment-send class="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"><i data-lucide="send" class="w-4 h-4"></i> Verstuur</button>
+        </div>
+      </div>
+    </div>`);
+}
+
+/* ---------- Gesprek (reacties) ---------- */
+function commentListHtml(comments) {
+  if (!comments.length) return `<p class="py-2 text-sm text-slate-400">Nog geen berichten. Start het gesprek hieronder.</p>`;
+  const me = (S.account && (S.account.name || S.account.username)) || "";
+  return `<div class="space-y-3">${comments.map((c) => {
+    const mine = c.auteur === me;
+    const initials = (c.auteur || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+    return `<div class="flex gap-2.5">
+      <span class="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full ${mine ? "bg-slate-900 text-white" : "bg-slate-200 text-slate-600"} text-xs font-semibold">${esc(initials || "?")}</span>
+      <div class="min-w-0 flex-1">
+        <div class="flex flex-wrap items-baseline gap-x-2">
+          <span class="text-sm font-medium text-slate-800">${esc(c.auteur || "Onbekend")}</span>
+          <span class="text-xs text-slate-400">${fmtDateTime(c.datum)}</span>
+        </div>
+        <div class="mt-1 whitespace-pre-wrap break-words rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">${esc(c.bericht || "")}</div>
+      </div>
+    </div>`;
+  }).join("")}</div>`;
+}
+async function loadAndRenderComments(meldingId) {
+  const box = $("#gesprek"); if (!box) return;
+  box.innerHTML = `<div class="py-4 text-center text-slate-300"><i data-lucide="loader-2" class="mx-auto w-5 h-5 animate-spin"></i></div>`; icons();
+  try {
+    const comments = await fetchComments(meldingId);
+    box.innerHTML = commentListHtml(comments); icons();
+    box.scrollTop = box.scrollHeight;
+  } catch (e) { console.error(e); box.innerHTML = `<p class="py-2 text-sm text-slate-400">Berichten laden mislukt.</p>`; }
+}
+async function postComment(meldingId) {
+  const ta = $("#comment-input"); if (!ta) return;
+  const text = ta.value.trim(); if (!text) return;
+  const btn = $("[data-comment-send]");
+  const auteur = (S.account && (S.account.name || S.account.username)) || "Onbekend";
+  if (btn) btn.disabled = true;
+  ta.disabled = true;
+  try { await addComment(meldingId, auteur, text); ta.value = ""; await loadAndRenderComments(meldingId); }
+  catch (e) { console.error(e); toast("Bericht versturen mislukt"); }
+  finally { if (btn) btn.disabled = false; ta.disabled = false; ta.focus(); }
+}
+
+/* ---------- E-mailinstellingen (beheerder) ---------- */
+function viewSettings() {
+  if (!S.isAdmin) return shell(`<p class="text-slate-500">Geen toegang. Deze pagina is enkel voor beheerders.</p>`);
+  const s = S.settings || { enabled: true, recipients: [] };
+  const FASEN = [
+    { key:"inkomend",  label:"Ontvangst",  color:"#0284c7", soft:"#e0f2fe" },
+    { key:"voorraad",  label:"Voorraad",   color:"#f59e0b", soft:"#fef3c7" },
+    { key:"uitgaand",  label:"Verzending", color:"#7c3aed", soft:"#ede9fe" },
+    { key:"levering",  label:"Levering",   color:"#e11d48", soft:"#ffe4e6" },
+  ];
+  const ALL_KEYS = FASEN.map((f) => f.key);
+  const rows = (s.recipients || []).map((r, i) => {
+    const fasen = Array.isArray(r.fasen) && r.fasen.length ? r.fasen : ALL_KEYS;
+    const faseBoxes = FASEN.map((f) => {
+      const chk = fasen.includes(f.key) ? "checked" : "";
+      return `<label class="inline-flex cursor-pointer items-center gap-1">
+        <input type="checkbox" data-recip-fase='${i}' data-fase='${f.key}' ${chk} class="h-3.5 w-3.5 rounded border-slate-300" />
+        <span class="inline-flex items-center gap-1 text-xs text-slate-600">
+          <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${f.color}"></span>
+          ${f.label}
+        </span></label>`;
+    }).join("");
+    return `
+    <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+      <div class="flex items-center gap-2">
+        <input data-recip-email='${i}' value='${esc(r.email || "")}' placeholder="naam@verpa.be" type="email"
+          class="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-200" />
+        <input data-recip-naam='${i}' value='${esc(r.naam || "")}' placeholder="Naam (optioneel)"
+          class="w-28 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-200 sm:w-36" />
+        <button data-recip-remove='${i}' title="Verwijderen"
+          class="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600">
+          <i data-lucide="trash-2" class="w-4 h-4"></i></button>
+      </div>
+      <div class="flex flex-wrap gap-x-3 gap-y-1.5 pl-0.5">
+        <span class="text-xs font-medium text-slate-500 self-center">Ontvangt:</span>
+        ${faseBoxes}
+      </div>
+    </div>`;
+  }).join("");
+  return shell(`
+    <button data-nav='dashboard' class="mb-4 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800"><i data-lucide="chevron-left" class="w-4 h-4"></i> Terug</button>
+    <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div class="border-b border-slate-100 px-4 py-4 sm:px-5">
+        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-400">Beheer</div>
+        <div class="text-base font-semibold tracking-tight">E-mailinstellingen</div>
+        <p class="mt-1 text-sm text-slate-500">Stel per ontvanger in voor welke fasen ze een e-mail ontvangen bij een nieuwe melding.</p>
+      </div>
+      <div class="space-y-4 p-4 sm:p-5">
+        <label class="flex cursor-pointer items-center gap-3">
+          <input type="checkbox" data-notify-toggle ${s.enabled ? "checked" : ""} class="h-4 w-4 rounded border-slate-300" />
+          <span class="text-sm text-slate-700">E-mailmeldingen inschakelen</span>
+        </label>
+        <div>
+          <div class="mb-2.5 text-sm font-medium text-slate-700">Ontvangers</div>
+          <div id="recip-list" class="space-y-2">${rows || `<p class="text-sm text-slate-400">Nog geen ontvangers toegevoegd.</p>`}</div>
+          <button data-recip-add class="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50">
+            <i data-lucide="plus" class="w-4 h-4"></i> Ontvanger toevoegen</button>
+        </div>
+      </div>
+      <div class="flex items-center justify-end gap-2 border-t border-slate-100 bg-slate-50 px-4 py-4 sm:px-5">
+        <button data-action='settings-save' class="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800">Opslaan</button>
+      </div>
+    </div>`);
+}
+function syncRecipientsFromDom() {
+  if (!S.settings) S.settings = { enabled: true, recipients: [] };
+  const list = [];
+  document.querySelectorAll("[data-recip-email]").forEach((el) => {
+    const i = +el.getAttribute("data-recip-email");
+    const naam = document.querySelector(`[data-recip-naam='${i}']`);
+    const fasen = Array.from(document.querySelectorAll(`[data-recip-fase='${i}']:checked`))
+                       .map((cb) => cb.getAttribute("data-fase"));
+    list.push({ email: el.value.trim(), naam: naam ? naam.value.trim() : "", fasen, actief: true });
+  });
+  S.settings.recipients = list;
+  const t = document.querySelector("[data-notify-toggle]");
+  if (t) S.settings.enabled = t.checked;
+}
+function wireSettings() {
+  const ALL_KEYS = ["inkomend","voorraad","uitgaand","levering"];
+  const add = document.querySelector("[data-recip-add]");
+  if (add) add.onclick = () => { syncRecipientsFromDom(); S.settings.recipients.push({ email: "", naam: "", fasen: ALL_KEYS, actief: true }); render(); };
+  document.querySelectorAll("[data-recip-remove]").forEach((b) => b.onclick = () => {
+    syncRecipientsFromDom(); S.settings.recipients.splice(+b.getAttribute("data-recip-remove"), 1); render();
+  });
+}
+
+/* ---------- Thumbnails + viewer ---------- */
+function thumbsHtml(photos, removable) {
+  if (!photos || !photos.length) return "";
+  return `<div class="flex flex-wrap gap-2">${photos.map((p, i) => `
+    <div class="group relative h-20 w-20 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+      <button data-thumb='${i}' class="grid h-full w-full place-items-center text-slate-300"><i data-lucide="loader-2" class="w-5 h-5 animate-spin"></i></button>
+      <span class="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1 bg-black/50 px-1.5 py-1 text-[10px] font-medium text-white opacity-0 transition group-hover:opacity-100"><i data-lucide="zoom-in" class="w-3 h-3"></i> Openen</span>
+      ${removable ? `<button data-removefoto='${i}' class="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-black/60 text-white hover:bg-black/80"><i data-lucide="x" class="w-3 h-3"></i></button>` : ""}
+    </div>`).join("")}</div>`;
+}
+async function hydrateThumbs(container, photos) {
+  const btns = container.querySelectorAll("[data-thumb]");
+  // Klik-handlers koppelen: thumbnails worden ná wireEvents() ingevoegd,
+  // dus hier (na de injectie) aan de knoppen hangen.
+  btns.forEach((b) => b.onclick = () => openThumb(b));
+  container.querySelectorAll("[data-removefoto]").forEach((b) => b.onclick = () => { formPhotos.splice(+b.getAttribute("data-removefoto"), 1); renderFormThumbs(); });
+  photos.forEach(async (p, i) => {
+    try {
+      const url = await getFotoBlobUrl(p);
+      const btn = btns[i]; if (!btn) return;
+      btn.innerHTML = `<img src="${url}" alt="${esc(p.name)}" class="h-full w-full object-cover" />`;
+    } catch (e) {
+      const btn = btns[i]; if (btn) btn.innerHTML = `<i data-lucide="images" class="w-6 h-6"></i>`, icons();
+    }
+  });
+}
+function openViewer(photos, startIndex) {
+  let index = startIndex;
+  const root = $("#overlay-root");
+  root.innerHTML = `
+    <div id="viewer" class="fixed inset-0 z-40 flex flex-col bg-black/90">
+      <div class="flex items-center justify-between px-4 py-3 text-white">
+        <div class="min-w-0"><div id="v-name" class="truncate text-sm font-medium"></div>${photos.length > 1 ? `<div id="v-count" class="text-xs text-white/60"></div>` : ""}</div>
+        <div class="flex items-center gap-1">
+          <a id="v-download" href="#" download class="grid h-9 w-9 place-items-center rounded-full text-white/80 hover:bg-white/10"><i data-lucide="download" class="w-5 h-5"></i></a>
+          <button data-vclose class="grid h-9 w-9 place-items-center rounded-full text-white/80 hover:bg-white/10"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+      </div>
+      <div id="v-stage" class="relative flex flex-1 items-center justify-center overflow-hidden px-2 pb-4">
+        <i data-lucide="loader-2" class="w-8 h-8 animate-spin text-white/70"></i>
+        ${photos.length > 1 ? `
+          <button data-vprev class="absolute left-2 top-1/2 grid h-11 w-11 -translate-y-1/2 place-items-center rounded-full bg-white/10 text-white hover:bg-white/20"><i data-lucide="chevron-left" class="w-6 h-6"></i></button>
+          <button data-vnext class="absolute right-2 top-1/2 grid h-11 w-11 -translate-y-1/2 place-items-center rounded-full bg-white/10 text-white hover:bg-white/20"><i data-lucide="chevron-right" class="w-6 h-6"></i></button>` : ""}
+      </div>
+    </div>`;
+  icons();
+  const stage = $("#v-stage"), nameEl = $("#v-name"), countEl = $("#v-count"), dl = $("#v-download");
+
+  async function show() {
+    nameEl.textContent = photos[index].name || "";
+    if (countEl) countEl.textContent = `${index + 1} / ${photos.length}`;
+    // reset naar spinner
+    [...stage.querySelectorAll("img")].forEach((n) => n.remove());
+    const spin = stage.querySelector("i[data-lucide], svg.lucide-loader-2, svg");
+    try {
+      const url = await getFotoBlobUrl(photos[index]);
+      const img = document.createElement("img");
+      img.src = url; img.alt = photos[index].name || "";
+      img.className = "max-h-full max-w-full select-none rounded-lg object-contain";
+      img.onclick = (e) => e.stopPropagation();
+      stage.insertBefore(img, stage.firstChild);
+      dl.href = url; dl.setAttribute("download", photos[index].name || "foto");
+    } catch (e) { /* laat spinner/placeholder staan */ }
+  }
+  const go = (d) => { index = (index + d + photos.length) % photos.length; show(); };
+  function close() { root.innerHTML = ""; document.removeEventListener("keydown", onKey); }
+  function onKey(e) { if (e.key === "Escape") close(); else if (e.key === "ArrowRight" && photos.length > 1) go(1); else if (e.key === "ArrowLeft" && photos.length > 1) go(-1); }
+  document.addEventListener("keydown", onKey);
+
+  const viewer = $("#viewer");
+  viewer.addEventListener("click", (e) => { if (e.target.closest("#v-stage") && !e.target.closest("button") && !e.target.closest("a") && e.target.tagName !== "IMG") close(); });
+  $("[data-vclose]").onclick = close;
+  const prev = $("[data-vprev]"), next = $("[data-vnext]");
+  if (prev) prev.onclick = (e) => { e.stopPropagation(); go(-1); };
+  if (next) next.onclick = (e) => { e.stopPropagation(); go(1); };
+  let startX = null;
+  viewer.addEventListener("touchstart", (e) => (startX = e.touches[0].clientX), { passive: true });
+  viewer.addEventListener("touchend", (e) => { if (startX == null) return; const dx = e.changedTouches[0].clientX - startX; if (Math.abs(dx) > 50 && photos.length > 1) go(dx < 0 ? 1 : -1); startX = null; });
+  show();
+}
+
+/* ---------- CSV export ---------- */
+function exportCSV() {
+  const cols = ["id", "type", "status", "prioriteit", "aangemaakt", "warehouse", "artikelnummer", "omschrijving", "aantal", "melder"];
+  const q = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+  const rows = filteredReports().map((r) => {
+    const stage = stageByKey(r.type);
+    const details = stage.fields.map((f) => (r[f.name] ? `${f.label}: ${r[f.name]}` : "")).filter(Boolean).join(" | ");
+    return [...cols.map((c) => q(c === "type" ? stage.label : r[c])), q(details)].join(",");
+  });
+  const csv = "\uFEFF" + [...cols, "details"].join(",") + "\n" + rows.join("\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const a = document.createElement("a"); a.href = url; a.download = `schademeldingen_${todayISO()}.csv`; a.click();
+  URL.revokeObjectURL(url);
+}
+
+/* ---------- Toast ---------- */
+function toast(msg) {
+  const root = $("#overlay-root");
+  const t = document.createElement("div");
+  t.className = "fixed bottom-5 left-1/2 z-50 -translate-x-1/2";
+  t.innerHTML = `<div class="flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2 text-sm text-white shadow-lg"><i data-lucide="check-circle-2" class="w-4 h-4 text-emerald-400"></i> ${esc(msg)}</div>`;
+  root.appendChild(t); icons();
+  setTimeout(() => t.remove(), 2600);
+}
+
+/* ==================================================================== *
+ *  RENDER + EVENTS
+ * ==================================================================== */
+function render() {
+  const app = $("#app");
+  if (S.loading) { app.innerHTML = loadingScreen(); icons(); return; }
+  if (S.error) { app.innerHTML = errorScreen(S.error); icons(); wireEvents(); return; }
+  if (S.view.name === "form") app.innerHTML = viewForm(S.view.stageKey);
+  else if (S.view.name === "detail") app.innerHTML = viewDetail(S.view.id);
+  else if (S.view.name === "settings") app.innerHTML = viewSettings();
+  else app.innerHTML = viewDashboard();
+  icons();
+  wireEvents();
+  if (S.view.name === "settings") wireSettings();
+  if (S.view.name === "form") { formPhotos = formPhotos || []; renderFormThumbs(); }
+  if (S.view.name === "detail") {
+    const r = S.reports.find((x) => x.id === S.view.id);
+    const box = $("#detailthumbs");
+    if (r && r.fotos && r.fotos.length && box) { box.innerHTML = thumbsHtml(r.fotos, false); icons(); hydrateThumbs(box, r.fotos); }
+    if (r) {
+      loadAndRenderComments(r.id);
+      const sendBtn = $("[data-comment-send]"); if (sendBtn) sendBtn.onclick = () => postComment(r.id);
+      const ta = $("#comment-input"); if (ta) ta.onkeydown = (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); postComment(r.id); } };
+    }
+  }
+}
+
+function loadingScreen() {
+  return `<div class="grid min-h-screen place-items-center"><div class="text-center text-slate-400"><i data-lucide="loader-2" class="mx-auto w-8 h-8 animate-spin"></i><p class="mt-3 text-sm">Laden…</p></div></div>`;
+}
+function loginScreen() {
+  return `<div class="grid min-h-screen place-items-center px-6">
+    <div class="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
+      <span class="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-slate-900 text-white"><i data-lucide="alert-triangle" class="w-6 h-6"></i></span>
+      <h1 class="mt-4 text-lg font-semibold tracking-tight">Schademeldingen</h1>
+      <p class="mt-1 text-sm text-slate-500">Verpa Benelux · Magazijn</p>
+      <button data-action='login' class="mt-6 w-full rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800">Aanmelden met Microsoft</button>
+    </div></div>`;
+}
+function errorScreen(msg) {
+  return `<div class="grid min-h-screen place-items-center px-6">
+    <div class="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+      <span class="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-rose-50 text-rose-600"><i data-lucide="alert-triangle" class="w-6 h-6"></i></span>
+      <h1 class="mt-4 text-base font-semibold">Er ging iets mis</h1>
+      <p class="mt-2 break-words text-sm text-slate-500">${esc(msg)}</p>
+      <button data-action='reload' class="mt-6 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800">Opnieuw proberen</button>
+    </div></div>`;
+}
+function setupScreen() {
+  return `<div class="grid min-h-screen place-items-center px-6">
+    <div class="w-full max-w-md rounded-2xl border border-amber-200 bg-white p-8 shadow-sm">
+      <h1 class="text-base font-semibold">Nog instellen</h1>
+      <p class="mt-2 text-sm text-slate-600">Vul bovenaan in <code class="rounded bg-slate-100 px-1">index.html</code> de <code class="rounded bg-slate-100 px-1">CONFIG</code> in: clientId, tenantId, siteHostname en sitePath uit je Azure-app en SharePoint-site.</p>
+    </div></div>`;
+}
+
+function wireEvents() {
+  document.querySelectorAll("[data-nav]").forEach((b) => b.onclick = () => go({ name: b.getAttribute("data-nav") }));
+  document.querySelectorAll("[data-newstage]").forEach((b) => b.onclick = () => { formPhotos = []; go({ name: "form", stageKey: b.getAttribute("data-newstage") }); });
+  document.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => go({ name: "detail", id: b.getAttribute("data-open") }));
+  document.querySelectorAll("[data-status]").forEach((b) => b.onclick = () => changeStatus(S.view.id, b.getAttribute("data-status")));
+  document.querySelectorAll("[data-thumb]").forEach((b) => b.onclick = () => openThumb(b));
+  document.querySelectorAll("[data-removefoto]").forEach((b) => b.onclick = () => { formPhotos.splice(+b.getAttribute("data-removefoto"), 1); renderFormThumbs(); });
+  document.querySelectorAll("[data-addfiles]").forEach((inp) => inp.onchange = (e) => { addFiles(e.target.files); e.target.value = ""; });
+
+  document.querySelectorAll("[data-filter]").forEach((el) => {
+    const key = el.getAttribute("data-filter");
+    if (key === "q") el.oninput = () => { S.filters.q = el.value; refreshList(); };
+    else el.onchange = () => { S.filters[key] = el.value; refreshList(); };
+  });
+
+  const actions = {
+    login, logout, reload: () => location.reload(),
+    export: exportCSV,
+    save: saveReport,
+    delete: (b) => confirmDelete(b.getAttribute("data-id")),
+    "settings-save": saveSettingsFromUI,
+  };
+  document.querySelectorAll("[data-action]").forEach((b) => b.onclick = () => actions[b.getAttribute("data-action")] && actions[b.getAttribute("data-action")](b));
+}
+
+async function saveSettingsFromUI() {
+  syncRecipientsFromDom();
+  S.settings.recipients = (S.settings.recipients || []).filter((r) => r.email);
+  const btn = document.querySelector("[data-action='settings-save']");
+  if (btn) { btn.disabled = true; btn.textContent = "Opslaan…"; }
+  try { await saveSettings(S.settings); toast("Instellingen opgeslagen"); go({ name: "dashboard" }); }
+  catch (e) { console.error(e); if (btn) { btn.disabled = false; btn.textContent = "Opslaan"; } toast("Opslaan mislukt"); }
+}
+
+/* Alleen de lijst verversen (filters) zonder de inputs te herbouwen */
+function refreshList() {
+  if (S.view.name !== "dashboard") return;
+  // Herteken enkel de lijst-sectie via volledige render is prima hier,
+  // maar we willen focus in het zoekveld behouden -> vervang enkel lijst.
+  const app = $("#app");
+  const listWrap = app.querySelectorAll("section")[1];
+  if (!listWrap) { render(); return; }
+  // eenvoudig: hele dashboard opnieuw, focus terugzetten op zoekveld
+  const hadFocus = document.activeElement && document.activeElement.getAttribute && document.activeElement.getAttribute("data-filter") === "q";
+  const caret = hadFocus ? document.activeElement.selectionStart : null;
+  render();
+  if (hadFocus) { const q = $("[data-filter='q']"); if (q) { q.focus(); if (caret != null) q.setSelectionRange(caret, caret); } }
+}
+
+function openThumb(btn) {
+  const idx = +btn.getAttribute("data-thumb");
+  const photos = S.view.name === "form" ? formPhotos : (S.reports.find((r) => r.id === S.view.id)?.fotos || []);
+  if (photos.length) openViewer(photos, idx);
+}
+
+/* Foto's toevoegen in het formulier (object-URL voor snelle preview; werkt buiten sandbox) */
+function addFiles(fileList) {
+  const items = Array.from(fileList || []).map((file) => ({ name: file.name, url: URL.createObjectURL(file), file }));
+  formPhotos.push(...items);
+  renderFormThumbs();
+}
+
+async function saveReport() {
+  const box = $("#formfields"); if (!box) return;
+  const stageKey = box.getAttribute("data-stage"); const id = box.getAttribute("data-id");
+  const stage = stageByKey(stageKey);
+  const fields = [...COMMON_HEAD, ...stage.fields, ...COMMON_TAIL];
+  const data = {}; box.querySelectorAll("[data-field]").forEach((el) => { data[el.getAttribute("data-field")] = el.value; });
+
+  // validatie
+  let bad = null;
+  box.querySelectorAll("[data-field]").forEach((el) => el.classList.remove("border-rose-400", "ring-1", "ring-rose-200"));
+  fields.forEach((f) => { if (f.required && !String(data[f.name] || "").trim()) { const el = box.querySelector(`[data-field='${f.name}']`); if (el) el.classList.add("border-rose-400", "ring-1", "ring-rose-200"); if (!bad) bad = el; } });
+  if (bad) { bad.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
+
+  const btn = $("[data-action='save']");
+  btn.disabled = true; btn.textContent = formPhotos.length ? "Foto's uploaden…" : "Opslaan…";
+  try {
+    let fotoRefs = [];
+    if (formPhotos.length) fotoRefs = await uploadFotos(id, formPhotos.map((p) => p.file));
+    const rec = await createReport({ ...data, id, type: stageKey, status: "Nieuw", aangemaakt: todayISO(), aantal: Number(data.aantal) || 0, fotos: fotoRefs });
+    S.reports.unshift(rec);
+    formPhotos = [];
+    notifyNewCase(rec).catch((e) => console.warn("E-mailmelding niet verstuurd:", e));
+    toast(`Melding ${rec.id} opgeslagen`);
+    go({ name: "detail", id: rec.id });
+  } catch (e) {
+    btn.disabled = false; btn.textContent = "Melding opslaan";
+    toast("Opslaan mislukt — probeer opnieuw");
+    console.error(e);
+  }
+}
+
+async function changeStatus(id, status) {
+  const r = S.reports.find((x) => x.id === id); if (!r) return;
+  const prev = r.status; r.status = status; render();
+  try { await updateReport(r.spId, { status }); } catch (e) { r.status = prev; render(); toast("Status bijwerken mislukt"); }
+}
+
+function confirmDelete(id) {
+  if (!S.isAdmin) { toast("Alleen beheerders kunnen verwijderen"); return; }
+  const root = $("#overlay-root");
+  root.innerHTML = `<div class="fixed inset-0 z-50 grid place-items-center bg-black/40 px-6">
+    <div class="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl">
+      <h3 class="text-base font-semibold">Melding verwijderen?</h3>
+      <p class="mt-1 text-sm text-slate-500">${esc(id)} wordt definitief uit SharePoint verwijderd.</p>
+      <div class="mt-5 flex justify-end gap-2">
+        <button data-cancel class="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">Annuleren</button>
+        <button data-confirm class="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700">Verwijderen</button>
+      </div>
+    </div></div>`;
+  $("[data-cancel]").onclick = () => (root.innerHTML = "");
+  $("[data-confirm]").onclick = async () => {
+    root.innerHTML = "";
+    const r = S.reports.find((x) => x.id === id); if (!r) return;
+    try { await deleteReport(r.spId); S.reports = S.reports.filter((x) => x.id !== id); toast("Melding verwijderd"); go({ name: "dashboard" }); }
+    catch (e) { toast("Verwijderen mislukt"); }
+  };
+}
+
+/* ==================================================================== *
+ *  INIT
+ * ==================================================================== */
+(async function init() {
+  render(); // toont "Laden…"
+  if (!CONFIG.clientId || !CONFIG.tenantId) { S.loading = false; $("#app").innerHTML = setupScreen(); icons(); return; }
+  try {
+    S.account = await initAuth();
+    if (!S.account) { S.loading = false; $("#app").innerHTML = loginScreen(); icons(); wireEvents(); return; }
+    S.isAdmin = isAdmin();
+    S.reports = await fetchReports();
+    S.settings = await loadSettings().catch(() => ({ spId: null, enabled: false, recipients: [] }));
+    // Diepe link vanuit de e-mail: ?case=SCH-...
+    const caseId = new URLSearchParams(location.search).get("case");
+    if (caseId && S.reports.find((r) => r.id === caseId)) S.view = { name: "detail", id: caseId };
+    S.loading = false;
+    render();
+  } catch (e) {
+    console.error(e);
+    S.loading = false; S.error = e.message || String(e); render();
+  }
+})();
+</script>
 </body>
 </html>

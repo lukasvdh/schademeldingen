@@ -67,6 +67,7 @@ const COMMON_HEAD = [
 ];
 const COMMON_TAIL = [
   { name: "prioriteit", label: "Prioriteit", type: "select", options: ["Laag", "Normaal", "Hoog"], required: true },
+  { name: "aangemaakt", label: "Datum melding", type: "date", required: true },
   { name: "melder", label: "Gemeld door", type: "text", placeholder: "Naam" },
   { name: "opmerkingen", label: "Opmerkingen", type: "textarea", placeholder: "Extra details over de schade…", full: true },
 ];
@@ -425,31 +426,44 @@ function buildEmailHtml(rec) {
  *  Iedereen mag lezen en berichten plaatsen.
  * ------------------------------------------------------------------ */
 let _commentsCtx = null;
+let INTERNAL_COMMENTS = null;
 async function ensureCommentsList() {
   if (_commentsCtx) return _commentsCtx;
   const siteId = await getSiteId();
   const found = await graph(`/sites/${siteId}/lists?$filter=displayName eq '${encodeURIComponent(CONFIG.commentsList)}'`);
-  if (!found.value || !found.value.length) throw new Error(`SharePoint-lijst "${CONFIG.commentsList}" niet gevonden.`);
-  _commentsCtx = { siteId, listId: found.value[0].id };
+  if (!found.value || !found.value.length) throw new Error(`LIJST_ONTBREEKT:${CONFIG.commentsList}`);
+  const listId = found.value[0].id;
+  _commentsCtx = { siteId, listId };
+  // Interne kolomnamen ophalen (zelfde aanpak als hoofdlijst)
+  const cols = await graph(`/sites/${siteId}/lists/${listId}/columns?$select=name,displayName`);
+  INTERNAL_COMMENTS = {};
+  (cols.value || []).forEach((c) => { if (c.displayName) INTERNAL_COMMENTS[c.displayName] = c.name; INTERNAL_COMMENTS[c.name] = c.name; });
   return _commentsCtx;
 }
+function ic(name) { return (INTERNAL_COMMENTS && INTERNAL_COMMENTS[name]) || name; }
 async function fetchComments(meldingId) {
   const { siteId, listId } = await ensureCommentsList();
-  const q = String(meldingId).replace(/'/g, "''");
+  // Haal alle items op en filter client-side — vermijdt de "Title not indexed" 400-fout.
   const d = await graph(
-    `/sites/${siteId}/lists/${listId}/items?expand=fields&$top=200&$filter=fields/Title eq '${q}'`,
-    { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly=true" } }
+    `/sites/${siteId}/lists/${listId}/items?expand=fields&$top=999&$select=id,createdDateTime,fields`
   );
   return (d.value || [])
-    .map((it) => ({ id: it.id, auteur: (it.fields || {}).Auteur, bericht: (it.fields || {}).Bericht, datum: it.createdDateTime }))
+    .filter((it) => String((it.fields || {}).Title || "") === String(meldingId))
+    .map((it) => {
+      const f = it.fields || {};
+      return { id: it.id, auteur: f[ic("Auteur")] || f.Auteur, bericht: f[ic("Bericht")] || f.Bericht, datum: it.createdDateTime };
+    })
     .sort((a, b) => (String(a.datum) < String(b.datum) ? -1 : 1));
 }
 async function addComment(meldingId, auteur, bericht) {
   const { siteId, listId } = await ensureCommentsList();
+  const fields = { Title: String(meldingId) };
+  fields[ic("Auteur")]  = auteur;
+  fields[ic("Bericht")] = bericht;
   const created = await graph(`/sites/${siteId}/lists/${listId}/items`, {
-    method: "POST", body: { fields: { Title: String(meldingId), Auteur: auteur, Bericht: bericht } },
+    method: "POST", body: { fields },
   });
-  return { id: created.id, auteur, bericht, datum: created.createdDateTime };
+  return { id: created.id, auteur, bericht, datum: created.createdDateTime || new Date().toISOString() };
 }
 
 /* Foto's ----------------------------------------------------------- */
@@ -493,7 +507,7 @@ async function getFotoBlobUrl(ref) {
 const S = {
   account: null, isAdmin: false, settings: null, reports: [], loading: true, error: null,
   view: { name: "dashboard" },
-  filters: { q: "", status: "Alle", stage: "Alle", warehouse: "Alle" },
+  filters: { q: "", status: "Alle", stage: "Alle", warehouse: "Alle", page: 0 },
 };
 let formPhotos = []; // { name, url, file } tijdens invullen
 
@@ -513,7 +527,7 @@ function shell(content) {
   <header class="sticky top-0 z-20 border-b border-slate-200 bg-white/85 backdrop-blur">
     <div class="mx-auto flex max-w-5xl items-center justify-between px-4 py-3 sm:px-6">
       <button data-nav='dashboard' class="flex items-center gap-2.5 text-left">
-        <span class="grid h-9 w-9 place-items-center rounded-lg bg-slate-900 text-white"><i data-lucide="alert-triangle" class="w-5 h-5"></i></span>
+        <img src="data:image/jpeg;base64,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" alt="Verpa" class="h-9 w-9 rounded-lg object-cover" />
         <span>
           <span class="block text-sm font-semibold leading-tight tracking-tight">Schademeldingen</span>
           <span class="block text-xs leading-tight text-slate-400">Verpa Benelux · Magazijn</span>
@@ -558,8 +572,18 @@ function viewDashboard() {
       </button>${chevron}`;
   }).join("");
 
-  const rows = filteredReports().map((r) => {
+  const PAGE_SIZE = 6;
+  const all = filteredReports();
+  const totalPages = Math.max(1, Math.ceil(all.length / PAGE_SIZE));
+  const page = Math.min(S.filters.page || 0, totalPages - 1);
+  const paged = all.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+
+  const rows = paged.map((r) => {
     const stage = stageByKey(r.type); const st = STATUS_META[r.status] || STATUS_META["Nieuw"];
+    // Extra labels: soort schade (inkomend) en actie bij ontvangst (inkomend)
+    const extraLabels = [];
+    if (r.typeSchade) extraLabels.push(`<span class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500"><i data-lucide="triangle-alert" class="w-2.5 h-2.5"></i>${esc(r.typeSchade)}</span>`);
+    if (r.actie) extraLabels.push(`<span class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500"><i data-lucide="clipboard-check" class="w-2.5 h-2.5"></i>${esc(r.actie)}</span>`);
     return `
       <button data-open='${esc(r.id)}' class="flex w-full items-center gap-3 border-t border-slate-100 px-4 py-3 text-left transition first:border-t-0 hover:bg-slate-50">
         <span class="h-8 w-1 shrink-0 rounded-full ${stage.accent.dot}"></span>
@@ -575,6 +599,7 @@ function viewDashboard() {
             ${(r.klant || r.leverancier) ? `<span class="truncate">${esc(r.klant || r.leverancier)}</span>` : ""}
             <span>${fmtDate(r.aangemaakt)}</span>
           </div>
+          ${extraLabels.length ? `<div class="mt-1.5 flex flex-wrap gap-1">${extraLabels.join("")}</div>` : ""}
         </div>
         <div class="flex shrink-0 flex-col items-end gap-1.5">
           <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${st.chip}"><i data-lucide="${st.icon}" class="w-3 h-3 ${st.ic}"></i> ${r.status}</span>
@@ -583,8 +608,20 @@ function viewDashboard() {
       </button>`;
   }).join("");
 
-  const listBlock = filteredReports().length
-    ? `<div class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">${rows}</div>`
+  // Paginering
+  const pagination = totalPages > 1 ? `
+    <div class="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-4 py-3">
+      <button data-page='${page - 1}' ${page === 0 ? "disabled" : ""} class="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 shadow-sm hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">
+        <i data-lucide="chevron-left" class="w-4 h-4"></i> Vorige
+      </button>
+      <span class="text-xs text-slate-500">Pagina ${page + 1} van ${totalPages} <span class="text-slate-400">(${all.length} meldingen)</span></span>
+      <button data-page='${page + 1}' ${page >= totalPages - 1 ? "disabled" : ""} class="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 shadow-sm hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">
+        Volgende <i data-lucide="chevron-right" class="w-4 h-4"></i>
+      </button>
+    </div>` : "";
+
+  const listBlock = all.length
+    ? `<div class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">${rows}${pagination}</div>`
     : `<div class="rounded-xl border border-dashed border-slate-200 bg-white p-10 text-center">
          <i data-lucide="clipboard-list" class="mx-auto w-8 h-8 text-slate-300"></i>
          <p class="mt-2 text-sm font-medium text-slate-600">Geen meldingen gevonden</p>
@@ -638,7 +675,8 @@ function filteredReports() {
     .filter((r) => f.status === "Alle" || r.status === f.status)
     .filter((r) => f.stage === "Alle" || r.type === f.stage)
     .filter((r) => f.warehouse === "Alle" || r.warehouse === f.warehouse)
-    .filter((r) => !needle || [r.id, r.artikelnummer, r.omschrijving, r.klant, r.leverancier, r.verkooporder, r.inkooporder].filter(Boolean).join(" ").toLowerCase().includes(needle));
+    .filter((r) => !needle || [r.id, r.artikelnummer, r.omschrijving, r.klant, r.leverancier, r.verkooporder, r.inkooporder].filter(Boolean).join(" ").toLowerCase().includes(needle))
+    .sort((a, b) => (String(a.aangemaakt) < String(b.aangemaakt) ? 1 : -1));
 }
 
 /* ---------- Formulier ---------- */
@@ -656,20 +694,29 @@ function fieldHtml(f, value, focusCls) {
   }
   return `<div class="${f.full ? "sm:col-span-2" : ""}"><label class="mb-1.5 block text-sm font-medium text-slate-700">${esc(f.label)}${req}</label>${control}</div>`;
 }
-function viewForm(stageKey) {
+function viewForm(stageKey, editRecord) {
   const stage = stageByKey(stageKey);
   const fields = [...COMMON_HEAD, ...stage.fields, ...COMMON_TAIL];
-  const id = nextId();
-  const defaults = {}; fields.forEach((f) => { if (f.type === "date") defaults[f.name] = todayISO(); if (f.name === "prioriteit") defaults[f.name] = "Normaal"; });
+  const isEdit = !!editRecord;
+  const id = isEdit ? editRecord.id : nextId();
+  const defaults = {};
+  if (isEdit) {
+    fields.forEach((f) => { defaults[f.name] = editRecord[f.name] ?? ""; });
+  } else {
+    fields.forEach((f) => { if (f.type === "date") defaults[f.name] = todayISO(); if (f.name === "prioriteit") defaults[f.name] = "Normaal"; });
+  }
   return shell(`
-    <button data-nav='dashboard' class="mb-4 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800"><i data-lucide="chevron-left" class="w-4 h-4"></i> Terug</button>
+    <button data-nav='${isEdit ? "detail:" + id : "dashboard"}' class="mb-4 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800"><i data-lucide="chevron-left" class="w-4 h-4"></i> ${isEdit ? "Terug naar melding" : "Terug"}</button>
     <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
       <div class="flex items-center gap-3 border-b border-slate-100 px-4 py-4 sm:px-5">
         <span class="grid h-11 w-11 place-items-center rounded-xl ring-1 ${stage.accent.iconBox}"><i data-lucide="${stage.icon}" class="w-6 h-6"></i></span>
-        <div><div class="text-[11px] font-medium uppercase tracking-wide text-slate-400">Nieuwe schademelding</div><div class="text-base font-semibold tracking-tight">${stage.label}</div></div>
+        <div>
+          <div class="text-[11px] font-medium uppercase tracking-wide text-slate-400">${isEdit ? "Melding bewerken" : "Nieuwe schademelding"}</div>
+          <div class="text-base font-semibold tracking-tight">${stage.label}</div>
+        </div>
         <span class="ml-auto font-mono text-xs text-slate-400">${id}</span>
       </div>
-      <div id="formfields" data-stage='${stageKey}' data-id='${id}' class="grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 sm:p-5">
+      <div id="formfields" data-stage='${stageKey}' data-id='${id}' data-edit='${isEdit ? "1" : "0"}' data-spid='${isEdit ? esc(editRecord.spId || "") : ""}' class="grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 sm:p-5">
         ${fields.map((f) => fieldHtml(f, defaults[f.name], stage.accent.focus)).join("")}
         <div class="sm:col-span-2">
           <label class="mb-1.5 block text-sm font-medium text-slate-700">Foto's</label>
@@ -687,8 +734,8 @@ function viewForm(stageKey) {
         </div>
       </div>
       <div class="flex items-center justify-end gap-2 border-t border-slate-100 bg-slate-50 px-4 py-4 sm:px-5">
-        <button data-nav='dashboard' class="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">Annuleren</button>
-        <button data-action='save' class="rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-sm ${stage.accent.btn}">Melding opslaan</button>
+        <button data-nav='${isEdit ? "detail:" + id : "dashboard"}' class="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">Annuleren</button>
+        <button data-action='${isEdit ? "update" : "save"}' class="rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-sm ${stage.accent.btn}">${isEdit ? "Wijzigingen opslaan" : "Melding opslaan"}</button>
       </div>
     </div>`);
 }
@@ -733,12 +780,12 @@ function viewDetail(id) {
       </div>
       <dl class="grid grid-cols-1 gap-x-6 gap-y-4 p-4 sm:grid-cols-2 sm:gap-x-8 sm:p-5">
         ${defs}
-        <div><dt class="text-xs font-medium uppercase tracking-wide text-slate-400">Aangemaakt</dt><dd class="mt-0.5 text-sm text-slate-800">${fmtDate(r.aangemaakt)}</dd></div>
         ${fotoBlock}
       </dl>
       <div class="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-4 py-4 sm:px-5">
         ${S.isAdmin
-          ? `<button data-action='delete' data-id='${esc(r.id)}' class="inline-flex items-center gap-1.5 text-sm font-medium text-slate-400 hover:text-rose-600"><i data-lucide="trash-2" class="w-4 h-4"></i> Verwijderen</button>`
+          ? `<button data-action='delete' data-id='${esc(r.id)}' class="inline-flex items-center gap-1.5 text-sm font-medium text-slate-400 hover:text-rose-600"><i data-lucide="trash-2" class="w-4 h-4"></i> Verwijderen</button>
+             <button data-action='edit' data-id='${esc(r.id)}' class="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 shadow-sm"><i data-lucide="pencil" class="w-4 h-4"></i> Bewerken</button>`
           : `<span class="inline-flex items-center gap-1.5 text-xs text-slate-400"><i data-lucide="lock" class="w-3.5 h-3.5"></i> Alleen beheerders kunnen verwijderen</span>`}
       </div>
     </div>
@@ -781,21 +828,42 @@ async function loadAndRenderComments(meldingId) {
   const box = $("#gesprek"); if (!box) return;
   box.innerHTML = `<div class="py-4 text-center text-slate-300"><i data-lucide="loader-2" class="mx-auto w-5 h-5 animate-spin"></i></div>`; icons();
   try {
+    console.log("[Gesprek] laden voor melding:", meldingId);
     const comments = await fetchComments(meldingId);
+    console.log("[Gesprek] geladen:", comments.length, "berichten");
     box.innerHTML = commentListHtml(comments); icons();
     box.scrollTop = box.scrollHeight;
-  } catch (e) { console.error(e); box.innerHTML = `<p class="py-2 text-sm text-slate-400">Berichten laden mislukt.</p>`; }
+  } catch (e) {
+    console.error("[Gesprek] fout bij laden:", e);
+    if (e.message && e.message.startsWith("LIJST_ONTBREEKT")) {
+      box.innerHTML = `<p class="py-2 text-sm text-slate-400">De lijst <strong>SchadeReacties</strong> bestaat nog niet in SharePoint. Maak hem eerst aan (zie stappenplan) om het gesprek te kunnen gebruiken.</p>`;
+    } else {
+      box.innerHTML = `<p class="py-2 text-sm text-rose-500 font-medium">Fout: ${esc(e.message || "onbekend")}. Zie console (F12) voor details.</p>`;
+    }
+  }
 }
 async function postComment(meldingId) {
   const ta = $("#comment-input"); if (!ta) return;
-  const text = ta.value.trim(); if (!text) return;
+  const text = ta.value.trim();
+  if (!text) { ta.focus(); return; }
   const btn = $("[data-comment-send]");
   const auteur = (S.account && (S.account.name || S.account.username)) || "Onbekend";
+  console.log("[Gesprek] versturen door:", auteur, "voor melding:", meldingId);
   if (btn) btn.disabled = true;
   ta.disabled = true;
-  try { await addComment(meldingId, auteur, text); ta.value = ""; await loadAndRenderComments(meldingId); }
-  catch (e) { console.error(e); toast("Bericht versturen mislukt"); }
-  finally { if (btn) btn.disabled = false; ta.disabled = false; ta.focus(); }
+  try {
+    await addComment(meldingId, auteur, text);
+    console.log("[Gesprek] bericht verstuurd");
+    ta.value = "";
+    await loadAndRenderComments(meldingId);
+  } catch (e) {
+    console.error("[Gesprek] fout bij versturen:", e);
+    if (e.message && e.message.startsWith("LIJST_ONTBREEKT")) {
+      toast("Maak eerst de SharePoint-lijst 'SchadeReacties' aan");
+    } else {
+      toast("Bericht versturen mislukt — " + (e.message || "zie console F12"));
+    }
+  } finally { if (btn) btn.disabled = false; ta.disabled = false; ta.focus(); }
 }
 
 /* ---------- E-mailinstellingen (beheerder) ---------- */
@@ -999,21 +1067,29 @@ function render() {
   if (S.loading) { app.innerHTML = loadingScreen(); icons(); return; }
   if (S.error) { app.innerHTML = errorScreen(S.error); icons(); wireEvents(); return; }
   if (S.view.name === "form") app.innerHTML = viewForm(S.view.stageKey);
+  else if (S.view.name === "edit") { const r = S.reports.find((x) => x.id === S.view.id); app.innerHTML = r ? viewForm(r.type, r) : viewDashboard(); }
   else if (S.view.name === "detail") app.innerHTML = viewDetail(S.view.id);
   else if (S.view.name === "settings") app.innerHTML = viewSettings();
   else app.innerHTML = viewDashboard();
   icons();
   wireEvents();
   if (S.view.name === "settings") wireSettings();
-  if (S.view.name === "form") { formPhotos = formPhotos || []; renderFormThumbs(); }
+  if (S.view.name === "form" || S.view.name === "edit") { formPhotos = formPhotos || []; renderFormThumbs(); }
   if (S.view.name === "detail") {
     const r = S.reports.find((x) => x.id === S.view.id);
     const box = $("#detailthumbs");
     if (r && r.fotos && r.fotos.length && box) { box.innerHTML = thumbsHtml(r.fotos, false); icons(); hydrateThumbs(box, r.fotos); }
     if (r) {
+      // Gesprek: laad berichten en koppel handlers
       loadAndRenderComments(r.id);
-      const sendBtn = $("[data-comment-send]"); if (sendBtn) sendBtn.onclick = () => postComment(r.id);
-      const ta = $("#comment-input"); if (ta) ta.onkeydown = (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); postComment(r.id); } };
+      const sendBtn = $("[data-comment-send]");
+      const ta = $("#comment-input");
+      if (sendBtn) sendBtn.onclick = (e) => { e.stopPropagation(); postComment(r.id); };
+      if (ta) {
+        ta.onkeydown = (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); postComment(r.id); } };
+        // Voorkom dat klikken in het tekstvak de pagina hertekent
+        ta.onclick = (e) => e.stopPropagation();
+      }
     }
   }
 }
@@ -1024,9 +1100,9 @@ function loadingScreen() {
 function loginScreen() {
   return `<div class="grid min-h-screen place-items-center px-6">
     <div class="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
-      <span class="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-slate-900 text-white"><i data-lucide="alert-triangle" class="w-6 h-6"></i></span>
+      <img src="data:image/jpeg;base64,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" alt="Verpa" class="mx-auto h-16 w-16 rounded-xl object-cover" />
       <h1 class="mt-4 text-lg font-semibold tracking-tight">Schademeldingen</h1>
-      <p class="mt-1 text-sm text-slate-500">Verpa Benelux · Magazijn</p>
+      <p class="mt-1 text-sm text-slate-500">Magazijn · Verpa Benelux</p>
       <button data-action='login' class="mt-6 w-full rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800">Aanmelden met Microsoft</button>
     </div></div>`;
 }
@@ -1048,7 +1124,11 @@ function setupScreen() {
 }
 
 function wireEvents() {
-  document.querySelectorAll("[data-nav]").forEach((b) => b.onclick = () => go({ name: b.getAttribute("data-nav") }));
+  document.querySelectorAll("[data-nav]").forEach((b) => b.onclick = () => {
+    const nav = b.getAttribute("data-nav");
+    if (nav.startsWith("detail:")) go({ name: "detail", id: nav.split(":")[1] });
+    else go({ name: nav });
+  });
   document.querySelectorAll("[data-newstage]").forEach((b) => b.onclick = () => { formPhotos = []; go({ name: "form", stageKey: b.getAttribute("data-newstage") }); });
   document.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => go({ name: "detail", id: b.getAttribute("data-open") }));
   document.querySelectorAll("[data-status]").forEach((b) => b.onclick = () => changeStatus(S.view.id, b.getAttribute("data-status")));
@@ -1058,15 +1138,20 @@ function wireEvents() {
 
   document.querySelectorAll("[data-filter]").forEach((el) => {
     const key = el.getAttribute("data-filter");
-    if (key === "q") el.oninput = () => { S.filters.q = el.value; refreshList(); };
-    else el.onchange = () => { S.filters[key] = el.value; refreshList(); };
+    if (key === "q") el.oninput = () => { S.filters.q = el.value; S.filters.page = 0; refreshList(); };
+    else el.onchange = () => { S.filters[key] = el.value; S.filters.page = 0; refreshList(); };
+  });
+  document.querySelectorAll("[data-page]").forEach((b) => {
+    if (!b.disabled) b.onclick = () => { S.filters.page = +b.getAttribute("data-page"); render(); window.scrollTo(0, 0); };
   });
 
   const actions = {
     login, logout, reload: () => location.reload(),
     export: exportCSV,
     save: saveReport,
+    update: updateReportFromForm,
     delete: (b) => confirmDelete(b.getAttribute("data-id")),
+    edit: (b) => { formPhotos = []; go({ name: "edit", id: b.getAttribute("data-id") }); },
     "settings-save": saveSettingsFromUI,
   };
   document.querySelectorAll("[data-action]").forEach((b) => b.onclick = () => actions[b.getAttribute("data-action")] && actions[b.getAttribute("data-action")](b));
@@ -1127,7 +1212,7 @@ async function saveReport() {
   try {
     let fotoRefs = [];
     if (formPhotos.length) fotoRefs = await uploadFotos(id, formPhotos.map((p) => p.file));
-    const rec = await createReport({ ...data, id, type: stageKey, status: "Nieuw", aangemaakt: todayISO(), aantal: Number(data.aantal) || 0, fotos: fotoRefs });
+    const rec = await createReport({ ...data, id, type: stageKey, status: "Nieuw", aangemaakt: data.aangemaakt || todayISO(), aantal: Number(data.aantal) || 0, fotos: fotoRefs });
     S.reports.unshift(rec);
     formPhotos = [];
     notifyNewCase(rec).catch((e) => console.warn("E-mailmelding niet verstuurd:", e));
@@ -1135,6 +1220,38 @@ async function saveReport() {
     go({ name: "detail", id: rec.id });
   } catch (e) {
     btn.disabled = false; btn.textContent = "Melding opslaan";
+    toast("Opslaan mislukt — probeer opnieuw");
+    console.error(e);
+  }
+}
+
+async function updateReportFromForm() {
+  const box = $("#formfields"); if (!box) return;
+  const stageKey = box.getAttribute("data-stage");
+  const id = box.getAttribute("data-id");
+  const spId = box.getAttribute("data-spid");
+  const stage = stageByKey(stageKey);
+  const fields = [...COMMON_HEAD, ...stage.fields, ...COMMON_TAIL];
+  const data = {}; box.querySelectorAll("[data-field]").forEach((el) => { data[el.getAttribute("data-field")] = el.value; });
+
+  // validatie
+  let bad = null;
+  box.querySelectorAll("[data-field]").forEach((el) => el.classList.remove("border-rose-400", "ring-1", "ring-rose-200"));
+  fields.forEach((f) => { if (f.required && !String(data[f.name] || "").trim()) { const el = box.querySelector(`[data-field='${f.name}']`); if (el) el.classList.add("border-rose-400", "ring-1", "ring-rose-200"); if (!bad) bad = el; } });
+  if (bad) { bad.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
+
+  const btn = $("[data-action='update']");
+  if (btn) { btn.disabled = true; btn.textContent = "Opslaan…"; }
+  try {
+    const patch = { ...data, aantal: Number(data.aantal) || 0, aangemaakt: data.aangemaakt || todayISO() };
+    await updateReport(spId, patch);
+    // lokale state bijwerken
+    const idx = S.reports.findIndex((r) => r.id === id);
+    if (idx !== -1) S.reports[idx] = { ...S.reports[idx], ...patch };
+    toast("Wijzigingen opgeslagen");
+    go({ name: "detail", id });
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = "Wijzigingen opslaan"; }
     toast("Opslaan mislukt — probeer opnieuw");
     console.error(e);
   }

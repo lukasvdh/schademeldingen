@@ -474,27 +474,25 @@ function viewDashboard() {
     const stage=stageByKey(r.type);
     const beschrijving = [r.klant,r.leverancier,r.omschrijving].filter(Boolean).join(" · ");
     return `
-      <button class="report-card" data-open="${esc(r.id)}">
-        <div style="flex:1;min-width:0;">
-          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.625rem;">
-            <div style="display:flex;align-items:center;gap:0.5rem;">
-              <span class="report-card__dossier">${esc(r.id)}</span>
-              <span class="${faseChipClass(r.type)}">${stage.stap}</span>
-            </div>
-            <span class="${statusChipClass(r.status)}">
-              <i data-lucide="${statusIconName(r.status)}" class="w-3 h-3"></i>
-              ${esc(r.status)}
-            </span>
+      <button class="report-item-card" data-open="${esc(r.id)}">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.625rem;">
+          <div style="display:flex;align-items:center;gap:0.5rem;">
+            <span class="report-card__dossier">${esc(r.id)}</span>
+            <span class="${faseChipClass(r.type)}">${stage.stap}</span>
           </div>
-          <div class="report-card__meta">
-            <div class="report-card__field"><span class="report-card__field-label">Klant / Leverancier</span><span class="report-card__field-value">${esc(r.klant||r.leverancier||"—")}</span></div>
-            <div class="report-card__field"><span class="report-card__field-label">Artikelnr.</span><span class="report-card__field-value mono">${esc(r.artikelnummer||"—")}</span></div>
-            <div class="report-card__field"><span class="report-card__field-label">Bedrag / Aantal</span><span class="report-card__field-value">${esc(r.aantal||0)} st.</span></div>
-            <div class="report-card__field"><span class="report-card__field-label">Ingediend door</span><span class="report-card__field-value">${esc(r.melder||"—")}</span></div>
-            <div class="report-card__field"><span class="report-card__field-label">Datum</span><span class="report-card__field-value">${fmtDate(r.aangemaakt)}</span></div>
-          </div>
-          ${beschrijving?`<div class="report-card__desc">${esc(beschrijving)}</div>`:""}
+          <span class="${statusChipClass(r.status)}">
+            <i data-lucide="${statusIconName(r.status)}" class="w-3 h-3"></i>
+            ${esc(r.status)}
+          </span>
         </div>
+        <div class="report-card__meta">
+          <div class="report-card__field"><span class="report-card__field-label">Klant / Leverancier</span><span class="report-card__field-value">${esc(r.klant||r.leverancier||"—")}</span></div>
+          <div class="report-card__field"><span class="report-card__field-label">Artikelnr.</span><span class="report-card__field-value mono">${esc(r.artikelnummer||"—")}</span></div>
+          <div class="report-card__field"><span class="report-card__field-label">Aantal</span><span class="report-card__field-value">${esc(r.aantal||0)} st.</span></div>
+          <div class="report-card__field"><span class="report-card__field-label">Ingediend door</span><span class="report-card__field-value">${esc(r.melder||"—")}</span></div>
+          <div class="report-card__field"><span class="report-card__field-label">Datum</span><span class="report-card__field-value">${fmtDate(r.aangemaakt)}</span></div>
+        </div>
+        ${beschrijving?`<div class="report-card__desc">${esc(beschrijving)}</div>`:""}
       </button>`;
   }).join("");
 
@@ -510,7 +508,7 @@ function viewDashboard() {
     </div>` : "";
 
   const listBlock = all.length
-    ? `<div class="report-list">${rows}${pagination}</div>`
+    ? `<div class="report-card-list">${rows}${pagination}</div>`
     : `<div class="empty-state">
          <i data-lucide="clipboard-list" class="empty-state__icon"></i>
          <p class="empty-state__title">Geen meldingen gevonden</p>

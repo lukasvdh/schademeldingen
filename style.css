@@ -477,37 +477,29 @@ html, body {
   border-color: #94a3b8;
 }
 
-/* ── MELDING KAART ──────────────────────────────────────── */
-.report-list {
+/* ── MELDING KAARTEN (dashboard lijst) ──────────────────── */
+.report-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.report-item-card {
+  display: block;
+  width: 100%;
+  background: #fff;
   border: 1.5px solid #e2e8f0;
   border-radius: 0.875rem;
-  overflow: hidden;
-  background: #fff;
-  box-shadow: 0 1px 4px rgba(0,0,0,.05);
-}
-
-.report-card {
-  display: flex;
-  align-items: flex-start;
-  gap: 1rem;
   padding: 1rem 1.25rem;
-  border-top: 1px solid #f1f5f9;
   cursor: pointer;
   text-align: left;
-  width: 100%;
-  border-left: none;
-  border-right: none;
-  border-bottom: none;
-  background: #fff;
-  transition: background 0.12s;
+  box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-.report-card:first-child {
-  border-top: none;
-}
-
-.report-card:hover {
-  background: #f8fafc;
+.report-item-card:hover {
+  border-color: #94a3b8;
+  box-shadow: 0 2px 8px rgba(0,0,0,.08);
 }
 
 .report-card__dossier {
@@ -1150,9 +1142,8 @@ textarea.field-control {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.75rem 1.25rem;
-  border-top: 1px solid #f1f5f9;
-  background: #f8fafc;
+  padding: 0.625rem 0;
+  margin-top: 0.25rem;
 }
 
 .pagination span {

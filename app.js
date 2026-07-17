@@ -580,8 +580,7 @@ function viewPending() {
         </div>
         ${r.opmerkingen ? `<div class="review-card__desc">${esc(r.opmerkingen)}</div>` : ""}
         <div class="review-card__footer">
-          <button class="btn btn--approve" data-approve="${esc(r.id)}"><i data-lucide="check" class="w-3.5 h-3.5"></i> Goedkeuren</button>
-          <button class="btn btn--reject" data-reject="${esc(r.id)}"><i data-lucide="x" class="w-3.5 h-3.5"></i> Weigeren</button>
+          <button class="btn btn--approve" data-approve="${esc(r.id)}"><i data-lucide="check" class="w-3.5 h-3.5"></i> Afhandelen</button>
           <button class="btn btn--ghost" data-open="${esc(r.id)}">Detail</button>
         </div>
       </div>`;
@@ -1061,9 +1060,8 @@ function wireEvents() {
   document.querySelectorAll("[data-removefoto]").forEach((b)=>b.onclick=()=>{ formPhotos.splice(+b.getAttribute("data-removefoto"),1); renderFormThumbs(); });
   document.querySelectorAll("[data-addfiles]").forEach((inp)=>inp.onchange=(e)=>{ addFiles(e.target.files); e.target.value=""; });
 
-  /* approve / reject in pending tab */
-  document.querySelectorAll("[data-approve]").forEach((b)=>b.onclick=()=>changeStatus(b.getAttribute("data-approve"),"In behandeling"));
-  document.querySelectorAll("[data-reject]").forEach((b)=>b.onclick=()=>changeStatus(b.getAttribute("data-reject"),"Afgehandeld"));
+  /* afhandelen in pending tab */
+  document.querySelectorAll("[data-approve]").forEach((b)=>b.onclick=()=>changeStatus(b.getAttribute("data-approve"),"Afgehandeld"));
 
   document.querySelectorAll("[data-filter]").forEach((el)=>{
     const key=el.getAttribute("data-filter");

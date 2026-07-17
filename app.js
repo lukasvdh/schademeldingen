@@ -426,7 +426,7 @@ function shell(content, activeTab) {
           <span class="app-nav__sub">Verpa Benelux</span>
         </span>
       </button>
-      <div class="app-nav__tabs">${tabsHtml}</div>
+      <div class="app-nav__tabs--desktop">${tabsHtml}</div>
       <div class="app-nav__right">
         ${S.isAdmin ? `<span class="admin-badge">Beheerder</span>` : ""}
         <span class="nav-user">${name}</span>
@@ -434,6 +434,7 @@ function shell(content, activeTab) {
         <button class="nav-icon-btn" data-action="logout" title="Afmelden"><i data-lucide="log-out" class="w-4 h-4"></i></button>
       </div>
     </div>
+    <div class="app-nav__tab-row">${tabsHtml}</div>
   </nav>
   <main class="app-main">${content}</main>`;
 }

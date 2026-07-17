@@ -411,7 +411,7 @@ function shell(content, activeTab) {
   ];
 
   const tabsHtml = tabs.map((t) => {
-    const active = activeTab === t.id ? "active" : "";
+    const active = (activeTab === t.id || (t.id === "form" && activeTab === "picker")) ? "active" : "";
     const badge  = t.badge ? `<span class="nav-tab__badge">${t.badge}</span>` : "";
     return `<button class="nav-tab ${active}" data-tab="${t.id}">${esc(t.label)}${badge}</button>`;
   }).join("");
@@ -599,6 +599,40 @@ function viewPending() {
     ${content}`, "pending");
 }
 
+/* ── FASE KIEZER ─────────────────────────────────────────── */
+function viewStagePicker() {
+  const iconStyle = {
+    inkomend: "background:#f0f9ff;color:#0284c7;box-shadow:0 0 0 1px #bae6fd;",
+    voorraad:  "background:#fffbeb;color:#d97706;box-shadow:0 0 0 1px #fde68a;",
+    uitgaand:  "background:#f5f3ff;color:#7c3aed;box-shadow:0 0 0 1px #ddd6fe;",
+    levering:  "background:#fff1f2;color:#e11d48;box-shadow:0 0 0 1px #fecdd3;",
+  };
+  const ctaColor = {
+    inkomend: "#0284c7", voorraad: "#d97706", uitgaand: "#7c3aed", levering: "#e11d48",
+  };
+
+  const tiles = STAGES.map((s) => `
+    <button class="fase-picker-card fase-picker-card--${s.key}" data-newstage="${s.key}">
+      <span class="fase-picker-card__icon" style="${iconStyle[s.key]}">
+        <i data-lucide="${s.icon}" class="w-6 h-6"></i>
+      </span>
+      <div>
+        <div class="fase-picker-card__title">${s.stap}</div>
+        <div class="fase-picker-card__sub">${s.label} — ${s.sub}</div>
+      </div>
+      <span class="fase-picker-card__cta" style="color:${ctaColor[s.key]};">
+        <i data-lucide="plus" class="w-3.5 h-3.5"></i> Melding indienen
+      </span>
+    </button>`).join("");
+
+  return shell(`
+    <div class="page-header">
+      <h1>Melding indienen</h1>
+      <p>Kies de fase waarin de schade is ontstaan.</p>
+    </div>
+    <div class="fase-picker">${tiles}</div>`, "picker");
+}
+
 /* ── FORMULIER ───────────────────────────────────────────── */
 function fieldHtml(f, value, stageKey) {
   const req = f.required ? `<span> *</span>` : "";
@@ -633,7 +667,7 @@ function viewForm(stageKey, editRecord) {
   }[stageKey]||"";
 
   return shell(`
-    <button class="back-link" data-nav="${isEdit?"detail:"+id:"dashboard"}">
+    <button class="back-link" data-nav="${isEdit?"detail:"+id:"picker"}">
       <i data-lucide="chevron-left" class="w-4 h-4"></i> ${isEdit?"Terug naar melding":"Terug"}
     </button>
     <div class="form-card">
@@ -663,7 +697,7 @@ function viewForm(stageKey, editRecord) {
         </div>
       </div>
       <div class="form-card__footer">
-        <button class="btn btn--ghost" data-nav="${isEdit?"detail:"+id:"dashboard"}">Annuleren</button>
+        <button class="btn btn--ghost" data-nav="${isEdit?"detail:"+id:"picker"}">Annuleren</button>
         <button class="btn btn--primary" data-action="${isEdit?"update":"save"}">${isEdit?"Wijzigingen opslaan":"Melding opslaan"}</button>
       </div>
     </div>`, "form");
@@ -985,7 +1019,8 @@ function render() {
   const app=$("#app");
   if(S.loading) { app.innerHTML=loadingScreen(); icons(); return; }
   if(S.error)   { app.innerHTML=errorScreen(S.error); icons(); wireEvents(); return; }
-  if(S.view.name==="form")      app.innerHTML=viewForm(S.view.stageKey);
+  if(S.view.name==="picker")    app.innerHTML=viewStagePicker();
+  else if(S.view.name==="form")      app.innerHTML=viewForm(S.view.stageKey);
   else if(S.view.name==="edit") { const r=S.reports.find((x)=>x.id===S.view.id); app.innerHTML=r?viewForm(r.type,r):viewDashboard(); }
   else if(S.view.name==="detail")   app.innerHTML=viewDetail(S.view.id);
   else if(S.view.name==="pending")  app.innerHTML=viewPending();
@@ -1041,7 +1076,7 @@ function wireEvents() {
   /* nav tabs */
   document.querySelectorAll("[data-tab]").forEach((b)=>b.onclick=()=>{
     const tab=b.getAttribute("data-tab");
-    if(tab==="form")    { formPhotos=[]; go({ name:"form", stageKey:S.view.stageKey||"inkomend" }); }
+    if(tab==="form")    { go({ name:"picker" }); }
     else if(tab==="pending") go({ name:"pending" });
     else go({ name:"dashboard" });
   });
@@ -1049,6 +1084,7 @@ function wireEvents() {
   document.querySelectorAll("[data-nav]").forEach((b)=>b.onclick=()=>{
     const nav=b.getAttribute("data-nav");
     if(nav.startsWith("detail:")) go({ name:"detail", id:nav.split(":")[1] });
+    else if(nav==="picker") go({ name:"picker" });
     else go({ name:nav });
   });
   document.querySelectorAll("[data-newstage]").forEach((b)=>b.onclick=()=>{ formPhotos=[]; go({ name:"form", stageKey:b.getAttribute("data-newstage") }); });

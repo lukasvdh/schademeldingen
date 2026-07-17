@@ -1366,3 +1366,70 @@ textarea.field-control {
 .section-mt { margin-top: 2rem; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── FASE KIEZER ─────────────────────────────────────────── */
+.fase-picker {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+  margin-top: 0.25rem;
+}
+
+@media (min-width: 640px) {
+  .fase-picker { gap: 1.25rem; }
+}
+
+.fase-picker-card {
+  background: #fff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 0.875rem;
+  padding: 1.5rem 1.25rem;
+  cursor: pointer;
+  text-align: left;
+  box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.12s;
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+}
+
+.fase-picker-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 14px rgba(0,0,0,.1);
+}
+
+.fase-picker-card--inkomend:hover { border-color: #38bdf8; }
+.fase-picker-card--voorraad:hover  { border-color: #fbbf24; }
+.fase-picker-card--uitgaand:hover  { border-color: #a78bfa; }
+.fase-picker-card--levering:hover  { border-color: #fb7185; }
+
+.fase-picker-card__icon {
+  display: grid;
+  place-items: center;
+  width: 3rem;
+  height: 3rem;
+  border-radius: 0.75rem;
+}
+
+.fase-picker-card__title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #0f172a;
+  margin-bottom: 0.2rem;
+}
+
+.fase-picker-card__sub {
+  font-size: 0.8125rem;
+  color: #64748b;
+  line-height: 1.45;
+}
+
+.fase-picker-card__cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  margin-top: auto;
+  padding-top: 0.5rem;
+}

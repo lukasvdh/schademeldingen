@@ -489,6 +489,7 @@ html, body {
   width: 100%;
   background: #fff;
   border: 1.5px solid #e2e8f0;
+  border-left: 4px solid #e2e8f0;
   border-radius: 0.875rem;
   padding: 1rem 1.25rem;
   cursor: pointer;
@@ -498,9 +499,13 @@ html, body {
 }
 
 .report-item-card:hover {
-  border-color: #94a3b8;
   box-shadow: 0 2px 8px rgba(0,0,0,.08);
 }
+
+.report-item-card--inkomend { border-left-color: #0284c7; }
+.report-item-card--voorraad { border-left-color: #f59e0b; }
+.report-item-card--uitgaand { border-left-color: #7c3aed; }
+.report-item-card--levering { border-left-color: #e11d48; }
 
 .report-card__dossier {
   font-size: 0.875rem;

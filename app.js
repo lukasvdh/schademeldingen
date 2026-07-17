@@ -474,7 +474,7 @@ function viewDashboard() {
     const stage=stageByKey(r.type);
     const beschrijving = [r.klant,r.leverancier,r.omschrijving].filter(Boolean).join(" · ");
     return `
-      <button class="report-item-card" data-open="${esc(r.id)}">
+      <button class="report-item-card report-item-card--${r.type}" data-open="${esc(r.id)}">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.625rem;">
           <div style="display:flex;align-items:center;gap:0.5rem;">
             <span class="report-card__dossier">${esc(r.id)}</span>

@@ -400,7 +400,7 @@ const LOGO_B64 = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQ
 /* ── SHELL ───────────────────────────────────────────────── */
 function shell(content, activeTab) {
   const name = S.account ? esc(S.account.name || S.account.username || "") : "Demo";
-  const pendingCount = S.reports.filter((r) => r.status === "Nieuw").length;
+  const pendingCount = S.reports.filter((r) => r.status === "Nieuw" || r.status === "In behandeling").length;
   const demoBar = CONFIG.demoMode
     ? `<div class="demo-bar">DEMO MODUS <span>— geen echte data, geen Microsoft-aanmelding vereist</span></div>` : "";
 
@@ -558,7 +558,7 @@ function viewDashboard() {
 
 /* ── TE BEOORDELEN (pending tab) ─────────────────────────── */
 function viewPending() {
-  const pending = S.reports.filter((r)=>r.status==="Nieuw");
+  const pending = S.reports.filter((r)=>r.status==="Nieuw"||r.status==="In behandeling");
   const cards = pending.map((r)=>{
     const stage = stageByKey(r.type);
     return `
@@ -597,7 +597,7 @@ function viewPending() {
   return shell(`
     <div class="page-header">
       <h1>Te beoordelen</h1>
-      <p>Meldingen met status "Nieuw".</p>
+      <p>Meldingen met status "Nieuw" of "In behandeling".</p>
     </div>
     ${content}`, "pending");
 }

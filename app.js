@@ -107,6 +107,7 @@ const COLS = {
   afhandeling:{col:"Afhandeling"}, klant:{col:"Klant"}, verkooporder:{col:"Verkooporder"},
   ontdektTijdens:{col:"OntdektTijdens"}, leveringsdatum:{col:"Leveringsdatum",kind:"date"},
   gemeldDoor:{col:"GemeldDoor"}, claimVervoerder:{col:"ClaimVervoerder"}, oplossing:{col:"Oplossing"},
+  afgehandeldOp:{col:"AfgehandeldOp",kind:"date"},
 };
 
 /* ── Helpers ─────────────────────────────────────────────── */
@@ -756,6 +757,7 @@ function viewDetail(id) {
       </div>
       <div class="detail-card__body">
         ${defs}
+        ${r.afgehandeldOp?`<dl class="detail-field"><dt>Datum afhandeling</dt><dd>${fmtDate(r.afgehandeldOp)}</dd></dl>`:""}
         ${fotoBlock}
       </div>
       <div class="detail-card__footer">
@@ -1195,8 +1197,13 @@ async function updateReportFromForm() {
 
 async function changeStatus(id,status) {
   const r=S.reports.find((x)=>x.id===id); if(!r) return;
-  const prev=r.status; r.status=status; render();
-  try { await updateReport(r.spId,{status}); } catch(e) { r.status=prev; render(); toast("Status bijwerken mislukt"); }
+  const prev=r.status; const prevDatum=r.afgehandeldOp;
+  r.status=status;
+  if(status==="Afgehandeld") r.afgehandeldOp=todayISO(); else r.afgehandeldOp=undefined;
+  render();
+  const patch={status};
+  if(status==="Afgehandeld") patch.afgehandeldOp=todayISO();
+  try { await updateReport(r.spId,patch); } catch(e) { r.status=prev; r.afgehandeldOp=prevDatum; render(); toast("Status bijwerken mislukt"); }
 }
 
 function confirmDelete(id) {

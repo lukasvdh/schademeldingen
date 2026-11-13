@@ -39,7 +39,6 @@ const STAGES = [
     fields: [
       { name: "leverancier",    label: "Leverancier",          type: "text",   placeholder: "Naam leverancier" },
       { name: "inkooporder",    label: "Inkooporder-nr.",      type: "text",   placeholder: "BC inkooporder", mono: true },
-      { name: "ontvangstdatum", label: "Ontvangstdatum",       type: "date" },
       { name: "vervoerder",     label: "Vervoerder",           type: "text",   placeholder: "Transporteur" },
       { name: "typeSchade",     label: "Soort schade",         type: "select", options: ["Transportschade","Verpakkingsschade","Productdefect","Nat / vochtig","Ontbrekend"] },
       { name: "actie",          label: "Actie bij ontvangst",  type: "select", options: ["Geweigerd","Onder voorbehoud aangenomen","Volledig aangenomen","Retour naar leverancier"] },
@@ -488,6 +487,7 @@ function viewDashboard() {
         </div>
         <div class="report-card__meta">
           <div class="report-card__field"><span class="report-card__field-label">Klant / Leverancier</span><span class="report-card__field-value">${esc(r.klant||r.leverancier||"—")}</span></div>
+          <div class="report-card__field"><span class="report-card__field-label">Ordernr.</span><span class="report-card__field-value mono">${esc(r.inkooporder||r.verkooporder||r.gekoppeldeOrder||"—")}</span></div>
           <div class="report-card__field"><span class="report-card__field-label">Artikelnr.</span><span class="report-card__field-value mono">${esc(r.artikelnummer||"—")}</span></div>
           <div class="report-card__field"><span class="report-card__field-label">Aantal</span><span class="report-card__field-value">${esc(r.aantal||0)} st.</span></div>
           <div class="report-card__field"><span class="report-card__field-label">Ingediend door</span><span class="report-card__field-value">${esc(r.melder||"—")}</span></div>
@@ -1012,7 +1012,7 @@ function filteredReports() {
     .filter((r)=>f.status==="Alle"||r.status===f.status)
     .filter((r)=>f.stage==="Alle"||r.type===f.stage)
     .filter((r)=>f.warehouse==="Alle"||r.warehouse===f.warehouse)
-    .filter((r)=>!needle||[r.id,r.artikelnummer,r.omschrijving,r.klant,r.leverancier,r.verkooporder,r.inkooporder].filter(Boolean).join(" ").toLowerCase().includes(needle))
+    .filter((r)=>!needle||[r.id,r.artikelnummer,r.omschrijving,r.klant,r.leverancier,r.verkooporder,r.inkooporder,r.gekoppeldeOrder].filter(Boolean).join(" ").toLowerCase().includes(needle))
     .sort((a,b)=>(String(a.aangemaakt)<String(b.aangemaakt)?1:-1));
 }
 
@@ -1166,7 +1166,8 @@ async function saveReport() {
   try {
     let fotoRefs=[];
     if(formPhotos.length) fotoRefs=await uploadFotos(id,formPhotos.map((p)=>p.file));
-    const rec=await createReport({...data,id,type:stageKey,status:"Nieuw",aangemaakt:data.aangemaakt||todayISO(),aantal:Number(data.aantal)||0,fotos:fotoRefs});
+    const extra=stageKey==="inkomend"?{ontvangstdatum:todayISO()}:{};
+    const rec=await createReport({...data,...extra,id,type:stageKey,status:"Nieuw",aangemaakt:data.aangemaakt||todayISO(),aantal:Number(data.aantal)||0,fotos:fotoRefs});
     S.reports.unshift(rec); formPhotos=[];
     notifyNewCase(rec).catch((e)=>console.warn("E-mailmelding niet verstuurd:",e));
     toast(`Melding ${rec.id} opgeslagen`); go({ name:"detail", id:rec.id });

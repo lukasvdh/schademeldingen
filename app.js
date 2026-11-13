@@ -997,14 +997,20 @@ function loadXlsx() {
 }
 async function exportExcel() {
   await loadXlsx();
-  const headers=["ID","Fase","Status","Prioriteit","Datum melding","Magazijn","Artikelnummer","Omschrijving","Aantal","Gemeld door","Details"];
+  /* Verzamel alle unieke detail-labels over alle fasen */
+  const detailLabels=[];
+  const seen=new Set();
+  STAGES.forEach((s)=>s.fields.forEach((f)=>{if(!seen.has(f.label)){seen.add(f.label);detailLabels.push({name:f.name,label:f.label});}}));
+  const baseHeaders=["ID","Fase","Status","Prioriteit","Datum melding","Magazijn","Artikelnummer","Omschrijving","Aantal","Gemeld door","Opmerkingen"];
+  const headers=[...baseHeaders,...detailLabels.map((d)=>d.label)];
   const data=filteredReports().map((r)=>{
     const stage=stageByKey(r.type);
-    const details=stage.fields.map((f)=>(r[f.name]?`${f.label}: ${r[f.name]}`:"")).filter(Boolean).join(" | ");
-    return [r.id,stage.label,r.status,r.prioriteit,r.aangemaakt,r.warehouse,r.artikelnummer,r.omschrijving,r.aantal||0,r.melder||"",details];
+    const baseRow=[r.id,stage.label,r.status,r.prioriteit,r.aangemaakt,r.warehouse,r.artikelnummer,r.omschrijving,r.aantal||0,r.melder||"",r.opmerkingen||""];
+    const detailRow=detailLabels.map((d)=>r[d.name]||"");
+    return [...baseRow,...detailRow];
   });
   const ws=XLSX.utils.aoa_to_sheet([headers,...data]);
-  ws["!cols"]=headers.map((_,i)=>({wch:i===10?50:i===7?30:15}));
+  ws["!cols"]=headers.map((h)=>({wch:Math.max(h.length+2,15)}));
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,"Schademeldingen");
   XLSX.writeFile(wb,`schademeldingen_${todayISO()}.xlsx`);

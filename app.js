@@ -538,7 +538,7 @@ function viewDashboard() {
           </div>
         </div>
         <button class="btn-export" data-action="export">
-          <i data-lucide="download" class="w-3.5 h-3.5"></i> Export CSV
+          <i data-lucide="download" class="w-3.5 h-3.5"></i> Export Excel
         </button>
       </div>
       <div class="filters">
@@ -983,19 +983,31 @@ function openViewer(photos,startIndex) {
   show();
 }
 
-/* ── CSV EXPORT ──────────────────────────────────────────── */
-function exportCSV() {
-  const cols=["id","type","status","prioriteit","aangemaakt","warehouse","artikelnummer","omschrijving","aantal","melder"];
-  const q=(v)=>`"${String(v==null?"":v).replace(/"/g,'""')}"`;
-  const rows=filteredReports().map((r)=>{
+/* ── EXCEL EXPORT ──────────────────────────────────────── */
+let _xlsxLoaded=false;
+function loadXlsx() {
+  if(_xlsxLoaded) return Promise.resolve();
+  return new Promise((res,rej)=>{
+    const s=document.createElement("script");
+    s.src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js";
+    s.onload=()=>{_xlsxLoaded=true;res();};
+    s.onerror=()=>rej(new Error("SheetJS laden mislukt"));
+    document.head.appendChild(s);
+  });
+}
+async function exportExcel() {
+  await loadXlsx();
+  const headers=["ID","Fase","Status","Prioriteit","Datum melding","Magazijn","Artikelnummer","Omschrijving","Aantal","Gemeld door","Details"];
+  const data=filteredReports().map((r)=>{
     const stage=stageByKey(r.type);
     const details=stage.fields.map((f)=>(r[f.name]?`${f.label}: ${r[f.name]}`:"")).filter(Boolean).join(" | ");
-    return [...cols.map((c)=>q(c==="type"?stage.label:r[c])),q(details)].join(",");
+    return [r.id,stage.label,r.status,r.prioriteit,r.aangemaakt,r.warehouse,r.artikelnummer,r.omschrijving,r.aantal||0,r.melder||"",details];
   });
-  const csv="\uFEFF"+[...cols,"details"].join(",")+"\n"+rows.join("\n");
-  const url=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"}));
-  const a=document.createElement("a"); a.href=url; a.download=`schademeldingen_${todayISO()}.csv`; a.click();
-  URL.revokeObjectURL(url);
+  const ws=XLSX.utils.aoa_to_sheet([headers,...data]);
+  ws["!cols"]=headers.map((_,i)=>({wch:i===10?50:i===7?30:15}));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,"Schademeldingen");
+  XLSX.writeFile(wb,`schademeldingen_${todayISO()}.xlsx`);
 }
 
 /* ── TOAST ───────────────────────────────────────────────── */
@@ -1116,7 +1128,7 @@ function wireEvents() {
 
   const actions = {
     login, logout, reload:()=>location.reload(),
-    export: exportCSV,
+    export: exportExcel,
     save:   saveReport,
     update: updateReportFromForm,
     delete: (b)=>confirmDelete(b.getAttribute("data-id")),

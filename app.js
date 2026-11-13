@@ -757,7 +757,7 @@ function viewDetail(id) {
       </div>
       <div class="detail-card__body">
         ${defs}
-        ${r.afgehandeldOp?`<dl class="detail-field"><dt>Datum afhandeling</dt><dd>${fmtDate(r.afgehandeldOp)}</dd></dl>`:""}
+        ${r.status==="Afgehandeld"?`<dl class="detail-field"><dt>Datum afhandeling</dt><dd>${r.afgehandeldOp?fmtDate(r.afgehandeldOp):"—"}</dd></dl>`:""}
         ${fotoBlock}
       </div>
       <div class="detail-card__footer">
